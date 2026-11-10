@@ -580,16 +580,17 @@ class GPModel(StateSpace):
     def discretization(
         self, dt: float
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Discretize current GP matrices at ``dt`` using stationary covariance.
+        """Discretize current GP matrices using the continuous diffusion integral.
 
         Return (Ad, B0d, B1d, Qd), with shapes and upper-factor convention as
         in StateSpace.discretization. Both input matrices are zero and share
-        storage. P0.T @ P0 supplies stationary covariance; no update is performed.
+        storage. Integrating diffusion avoids cancellation in Pinf-Ad Pinf Ad.T
+        for long length scales. No parameter update is performed.
         """
         Ad = discretization.state(self.A, dt)
         B0d = np.zeros((self.nx, self.nu))
         Qd = nearest_cholesky(
-            discretization.diffusion_stationary(self.P0.T @ self.P0, Ad)
+            discretization.diffusion_mfd(self.A, self.Q.T @ self.Q, dt)
         )
 
         # The default LDL factorization always returns an array.

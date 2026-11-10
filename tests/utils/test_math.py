@@ -73,3 +73,28 @@ def test_diff_upper_cholesky_invalid_input() -> None:
     """Invalid solves retain their original error instead of using an unset RHS."""
     with pytest.raises(ValueError, match="infs or NaNs"):
         diff_upper_cholesky(np.diag([np.nan, 2.0]), np.eye(2))
+
+
+@pytest.mark.parametrize(
+    "covariance",
+    [
+        np.array([[1e-4, 0.005], [0.005, 1.0]]),
+        np.array([[1e-4, 0.01], [0.01, 1.0]]),
+        np.array([[1.0, 2.0, 0.0], [2.0, 4.0, 0.0], [0.0, 0.0, 3.0]]),
+        np.zeros((3, 3)),
+    ],
+)
+def test_nearest_cholesky_pivoted_semidefinite(covariance):
+    """Pivoting must preserve both original state order and triangular form."""
+    original = covariance.copy()
+    factor = nearest_cholesky(covariance)
+    np.testing.assert_array_equal(factor, np.triu(factor))
+    np.testing.assert_allclose(factor.T @ factor, covariance, atol=1e-15)
+    np.testing.assert_array_equal(covariance, original)
+
+
+def test_nearest_cholesky_two_by_two_ldl_block():
+    """Retain the positive eigenmode of an indefinite LDL block."""
+    factor = nearest_cholesky(np.array([[0.0, 1.0], [1.0, 0.0]]))
+    np.testing.assert_array_equal(factor, np.triu(factor))
+    np.testing.assert_allclose(factor.T @ factor, np.full((2, 2), 0.5), atol=1e-15)

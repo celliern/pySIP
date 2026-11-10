@@ -148,9 +148,16 @@ def test_output_moments_and_public_estimate_use_covariance_variance_sum():
     assert estimator.log_likelihood(*args) == 0.0
 
 
-def test_proxy_normalizes_noncontiguous_dataframe_inputs_once():
+def test_strided_dataframe_inputs_preserve_correlated_missing_output_likelihood():
     states, x0, P0, _, _ = system()
     estimator = public_estimator(states, x0, P0)
-    frame = pd.DataFrame(np.arange(16.0).reshape(4, 4)[:, ::2])
-    converted = estimator._proxy_params(pd.Series(np.ones(4)), (frame, frame, frame))
-    assert all(value.flags.c_contiguous for value in converted[:-1])
+    u = np.arange(8.0).reshape(4, 2)[:, :1]
+    dtu = np.full((4, 2), 0.15)[:, :1]
+    y = (np.arange(24.0).reshape(4, 6) / 10)[:, ::2]
+    y[1, 1] = np.nan
+    xs, covariances, _, _, expected = covariance_reference(states, x0, P0, u, dtu, y)
+    args = (pd.Series(np.ones(4)), pd.DataFrame(u), pd.DataFrame(dtu), pd.DataFrame(y))
+    assert_allclose(estimator.log_likelihood(*args), expected, atol=1e-12)
+    filtered = estimator.filtering(*args)
+    assert_allclose(filtered.x, xs, atol=1e-12)
+    assert_allclose(filtered.P, covariances, atol=1e-12)

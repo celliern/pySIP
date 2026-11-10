@@ -81,9 +81,10 @@ def nearest_cholesky(m: np.ndarray, method: str = "ldl") -> np.ndarray | None:
 
     The input is symmetrized without mutation. ``eigen`` clips negative
     eigenvalues and returns an upper factor ``R`` with covariance ``R.T @ R``.
-    ``ldl`` clips diagonal entries of the LDL decomposition and returns
-    ``sqrt(diag(D)) @ L.T``; pivoting or block-diagonal D can prevent this
-    result from being triangular or reconstructing the original matrix.
+    ``ldl`` first tries Cholesky, then clips negative eigenvalues of the
+    block-diagonal LDL factor for semidefinite or indefinite inputs.
+    Pivoted and 2-by-2 block factors are triangularized by QR, preserving
+    the covariance in the original state ordering.
     ``jitter`` tries an upper Cholesky factor with diagonal additions from
     1e-9 up to (but excluding) 1, returning None if all attempts fail.
     An all-zero input is returned unchanged, including its object identity.
@@ -94,8 +95,19 @@ def nearest_cholesky(m: np.ndarray, method: str = "ldl") -> np.ndarray | None:
 
     x = (m + m.T) / 2.0
     if method == "ldl":
-        lu, d, _ = ldl(x, lower=True, hermitian=False)
-        return np.diag([np.sqrt(w) if w > 0 else 0 for w in d.diagonal()]) @ lu.T
+        try:
+            return np.linalg.cholesky(x).T
+        except LinAlgError:
+            pass
+        lu, d, perm = ldl(x, lower=True, hermitian=False)
+        if np.count_nonzero(d) == np.count_nonzero(d.diagonal()):
+            factor = np.sqrt(np.maximum(d.diagonal(), 0.0))[:, None] * lu.T
+            if np.array_equal(perm, np.arange(x.shape[0])):
+                return factor
+        else:
+            eigvals, vectors = np.linalg.eigh(d)
+            factor = np.sqrt(np.maximum(eigvals, 0.0))[:, None] * vectors.T @ lu.T
+        return np.linalg.qr(factor, mode="r")
     elif method == "eigen":
         eigvals, v = np.linalg.eigh(x)
         return np.linalg.qr(

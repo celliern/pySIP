@@ -4,6 +4,9 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import cast
 
+import numpy as np
+from scipy.linalg import block_diag
+
 from ...params import Parameters
 from ..base import GPModel, Node, Par
 
@@ -90,3 +93,15 @@ class GPSum(GPModel):
 
         self.P0[: self._gp1.nx, : self._gp1.nx] = self._gp1.P0
         self.P0[self._gp1.nx :, self._gp1.nx :] = self._gp2.P0
+
+    def discretization(
+        self, dt: float
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Compose independent discrete covariances without stationary subtraction."""
+        a1, _, _, q1 = self._gp1.discretization(dt)
+        a2, _, _, q2 = self._gp2.discretization(dt)
+        b = self.B.copy()
+        return (
+            cast(np.ndarray, block_diag(a1, a2)), b, b,
+            cast(np.ndarray, block_diag(q1, q2)),
+        )

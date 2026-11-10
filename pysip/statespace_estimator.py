@@ -175,7 +175,9 @@ class OutputEstimateResult(NamedTuple):
 def _solve_tril_transpose_inplace(A: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Solve ``A.T @ x = b`` for upper A, overwriting column vector b."""
     for i in range(b.shape[0]):
-        b[i] = (b[i] - A[:i, i] @ b[:i]) / A[i, i]
+        for j in range(i):
+            b[i, 0] -= A[j, i] * b[j, 0]
+        b[i, 0] /= A[i, i]
     return b
 
 
@@ -228,6 +230,7 @@ def _update_observed(
     if observed.size:
         # Selecting factor columns preserves the marginal covariance R.T @ R.
         _, R_obs = np.linalg.qr(R[:, observed])
+        R_obs = np.ascontiguousarray(R_obs)
         work = np.zeros((nx + observed.size, nx + observed.size))
         x, P, k_obs, S_obs = _update(
             C[observed], D[observed], R_obs, x, P, u, y[observed], work
@@ -273,10 +276,12 @@ def _log_likelihood(
     x0: np.ndarray, P0: np.ndarray, u: np.ndarray, dtu: np.ndarray,
     y: np.ndarray, states: States,
 ) -> float:
-    """Sum scalar negative Gaussian log likelihood over observed trajectory entries."""
+    """Sum negative log likelihood, omitting unobserved trailing forecasts."""
     x = x0
     P = P0
     n_timesteps = y.shape[0]
+    while n_timesteps and np.isnan(y[n_timesteps - 1]).all():
+        n_timesteps -= 1
     ny, nx = states.C.shape
     dtype = states.A.dtype
     _Arru = np.zeros((nx + ny, nx + ny), dtype=dtype)
@@ -286,9 +291,14 @@ def _log_likelihood(
         u_i = u[i].reshape(-1, 1)
         dtu_i = dtu[i].reshape(-1, 1)
         states_i = _unpack_states(states, i)
-        _, _, k, S, x, P = _kalman_step(
-            x, P, u_i, dtu_i, y_i, states_i, _Arru
+        x_up, P_up, k, S = _update_observed(
+            states_i.C, states_i.D, states_i.R, x, P, u_i, y_i, _Arru
         )
+        if i + 1 < n_timesteps:
+            x, P = _predict(
+                states_i.A, states_i.B0, states_i.B1, states_i.Q,
+                x_up, P_up, u_i, dtu_i,
+            )
         for j in range(ny):
             if not np.isnan(y_i[j, 0]):
                 log_likelihood += (
@@ -470,10 +480,11 @@ class KalmanQR:
         ss = self.ss
         ss.update()
         dts, idx = np.unique(dt, return_inverse=True)
-        A = np.zeros((ss.nx, ss.nx, dt.size))
-        B0 = np.zeros((ss.nx, ss.nu, dt.size))
-        B1 = np.zeros((ss.nx, ss.nu, dt.size))
-        Q = np.zeros((ss.nx, ss.nx, dt.size))
+        # Column-major storage makes each time slice contiguous for LAPACK.
+        A = np.empty((ss.nx, ss.nx, dt.size), order="F")
+        B0 = np.empty((ss.nx, ss.nu, dt.size), order="F")
+        B1 = np.empty((ss.nx, ss.nu, dt.size), order="F")
+        Q = np.empty((ss.nx, ss.nx, dt.size), order="F")
         Ai, B0i, B1i, Qi = map(np.dstack, zip(*map(ss.discretization, dts)))
         A[:] = Ai[:, :, idx]
         B0[:] = B0i[:, :, idx]
@@ -483,7 +494,8 @@ class KalmanQR:
         arrays = [np.ascontiguousarray(var.to_numpy()) for var in vars]
         states = States(A, B0, B1, ss.C, ss.D, Q, ss.R)
         x0 = np.ascontiguousarray(x0 if x0 is not None else ss.x0)
-        P0 = np.ascontiguousarray(P0 if P0 is not None else ss.P0)
+        # QR returns column-major factors; keep the loop's layout stable.
+        P0 = np.asfortranarray(P0 if P0 is not None else ss.P0)
         return (x0, P0, *arrays, states)
 
     def update(

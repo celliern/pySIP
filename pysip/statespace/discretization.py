@@ -177,6 +177,9 @@ def state_input_expm(
 def diffusion_mfd(A: np.ndarray, Q: np.ndarray, dt: float = 1.0) -> np.ndarray:
     """Discretize the diffusion matrix by Matrix Fraction Decomposition.
 
+    A short-step Van Loan exponential followed by covariance doubling avoids
+    overflow in the unstable ``-A.T`` block for long sampling intervals.
+
     Parameters
     ----------
     A : array_like
@@ -199,9 +202,15 @@ def diffusion_mfd(A: np.ndarray, Q: np.ndarray, dt: float = 1.0) -> np.ndarray:
     F[:nx, :nx] = A
     F[nx:, nx:] = -A.T
     F[:nx, nx:] = Q
-    Fd = expm(F * dt)[:nx, :]
-
-    return Fd[:, nx:] @ Fd[:, :nx].T
+    magnitude = np.linalg.norm(A, ord=np.inf) * abs(dt)
+    squarings = max(0, int(np.ceil(np.log2(magnitude)))) if magnitude > 1.0 else 0
+    Fd = expm(F * (dt / 2.0**squarings))[:nx, :]
+    Ad = Fd[:, :nx]
+    Qd = Fd[:, nx:] @ Ad.T
+    for _ in range(squarings):
+        Qd = Qd + Ad @ Qd @ Ad.T
+        Ad = Ad @ Ad
+    return (Qd + Qd.T) / 2.0
 
 
 def diffusion_lyap(A: np.ndarray, Q: np.ndarray, Ad: np.ndarray) -> np.ndarray:

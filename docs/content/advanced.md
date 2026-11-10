@@ -257,12 +257,15 @@ compared to the real output to estimate the parameters.
 As the models are defined in continuous time, the statespace model has to be
 discretized to be used in the optimization algorithm. The discretization is done
 using the [`StateSpace.discretization`](../api.md#pysip.statespace.base.StateSpace.discretization)
-method, which returns discrete matrices that will depend on the local timestep
-$\Delta t$. A caching strategy is used to avoid recomputing the discretization
-matrices at each iteration for constant $\Delta t$.
+method, which returns discrete matrices that depend on the local timestep
+$\Delta t$. Within one objective evaluation, equal timesteps share a
+discretization. Changing model parameters recomputes those matrices.
 
-Diverse discretization methods are available: it usually defaults to an analytic
-discretization method if possible, and to a numerical method (MFD) otherwise.
+Transitions use matrix exponentials by default; thermal models can select
+`method="analytic"`. GP process covariance is integrated from the continuous
+diffusion, and sums/products compose independent covariance increments without
+subtracting large stationary covariances. This matters especially for long
+length scales and small sampling intervals.
 
 By default, a zoh (zero order hold) discretization is used, but foh (first order
 hold) is also available.

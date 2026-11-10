@@ -9,7 +9,6 @@ import numpy as np
 
 from ...params import Parameters
 from ..base import GPModel, Node, Par
-from .periodic import Periodic
 
 
 @dataclass
@@ -89,17 +88,6 @@ class GPProduct(GPModel):
         self._I1 = np.eye(self._gp1.nx)
         self._I2 = np.eye(self._gp2.nx)
 
-        # special case for Periodic covariance
-        if isinstance(self._gp1, Periodic):
-            self._Q1 = self._gp1.P0
-        else:
-            self._Q1 = self._gp1.Q
-
-        if isinstance(self._gp2, Periodic):
-            self._Q2 = self._gp2.P0
-        else:
-            self._Q2 = self._gp2.Q
-
         super().__post_init__()
 
     def set_constant_continuous_ssm(self) -> None:
@@ -108,12 +96,38 @@ class GPProduct(GPModel):
         self._gp2.set_constant_continuous_ssm()
 
     def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
+        """Refresh product dynamics and factor the sum of child diffusion rates."""
         self._gp1.update_continuous_ssm()
         self._gp2.update_continuous_ssm()
 
         self.A = np.kron(self._gp1.A, self._I2) + np.kron(self._I1, self._gp2.A)
         self.C = np.kron(self._gp1.C, self._gp2.C)
-        self.Q = np.kron(self._Q1, self._Q2)
+        self.Q = np.linalg.qr(
+            np.vstack((
+                np.kron(self._gp1.Q, self._gp2.P0),
+                np.kron(self._gp1.P0, self._gp2.Q),
+            )),
+            mode="r",
+        )
         self.R = self._gp1.R
         self.P0 = np.kron(self._gp1.P0, self._gp2.P0)
+
+    def discretization(
+        self, dt: float
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Compose product covariance from positive semidefinite child increments.
+
+        P1⊗P2 - (A1 P1 A1.T)⊗(A2 P2 A2.T) equals
+        Q1⊗P2 + (A1 P1 A1.T)⊗Q2, without stationary subtraction.
+        """
+        a1, _, _, q1 = self._gp1.discretization(dt)
+        a2, _, _, q2 = self._gp2.discretization(dt)
+        q = np.linalg.qr(
+            np.vstack((
+                np.kron(q1, self._gp2.P0),
+                np.kron(self._gp1.P0 @ a1.T, q2),
+            )),
+            mode="r",
+        )
+        b = np.zeros((self.nx, self.nu))
+        return np.kron(a1, a2), b, b, q

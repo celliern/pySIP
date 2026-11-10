@@ -69,6 +69,23 @@ The generated site is written to `site/`.
   doctests. Only one latent-force input is currently supported; unsupported
   multiple-input configurations raise `ValueError`.
 
+## Frequentist performance and numerical stability
+
+- Built-in log-prior densities use SciPy directly without repeatedly constructing
+  frozen distributions. Parameter mutation and custom prior factories retain
+  their existing behavior.
+- Time-indexed matrices have contiguous column-major slices, matching QR factor
+  layouts and avoiding redundant JIT specializations. Likelihood evaluation omits
+  trailing unobserved forecasts; filtering and prediction still return them.
+- GP process covariance is integrated directly and composed from independent
+  kernel increments. This avoids cancellation for long length scales; corrected
+  fits may differ from results produced by the former stationary subtraction.
+- Product kernels also combine both continuous diffusion rates, so latent-force
+  models use the same covariance law as standalone GP discretization.
+- Numba compiles kernels on first use and caches them on disk. Keep that cache
+  writable and persistent across processes. Set `NUMBA_CACHE_DIR` before starting
+  Python to choose its location; cold-cache and warmed timings are distinct.
+
 ## IMPORTANT - Migration to v1.0.0
 
 The version 1.0.0 of pySIP is a major update of the library. It focused on

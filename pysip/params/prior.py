@@ -68,7 +68,14 @@ class BasePrior:
         """Evaluate log density at an array of standardized-coordinate quantiles."""
 
     def logpdf(self, x: float | NDArray[np.float64]) -> float | NDArray[np.float64]:
-        """Evaluate standardized-coordinate log density at scalar or array quantiles."""
+        """Evaluate log density without freezing built-in distributions.
+
+        Constructor arguments are read on every call. Custom factories retain
+        their fresh-distribution semantics, including subclasses of built-ins.
+        """
+        logpdf = _NUMERICAL_LOGPDF.get(type(self))
+        if logpdf is not None:
+            return logpdf(x, *self.shape_parameters)
         return self.scipy_dist.logpdf(x)
 
     def random(self, n: int = 1, hpd: float | None = None) -> NDArray[np.float64]:
@@ -276,3 +283,15 @@ class Uniform(BasePrior, metaclass=PriorMeta):
         lambda lower, upper: cast(rv_continuous_frozen, stats.uniform(loc=lower, scale=upper - lower))
     )
     _pymc_factory: ClassVar[Callable[..., TensorVariable]] = pm.Uniform
+
+
+# Only exact built-in classes have known factory semantics; never cache or
+# bypass a custom factory that may depend on mutable state outside its arguments.
+_NUMERICAL_LOGPDF: dict[type[BasePrior], Callable[..., Any]] = {
+    Normal: stats.norm.logpdf,
+    Gamma: lambda x, a, b: stats.gamma.logpdf(x, a=a, scale=1.0 / b),
+    Beta: stats.beta.logpdf,
+    InverseGamma: lambda x, a, b: stats.invgamma.logpdf(x, a=a, scale=b),
+    LogNormal: lambda x, mu, sigma: stats.lognorm.logpdf(x, scale=np.exp(mu), s=sigma),
+    Uniform: lambda x, lower, upper: stats.uniform.logpdf(x, loc=lower, scale=upper - lower),
+}
