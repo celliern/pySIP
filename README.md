@@ -86,6 +86,21 @@ The generated site is written to `site/`.
   writable and persistent across processes. Set `NUMBA_CACHE_DIR` before starting
   Python to choose its location; cold-cache and warmed timings are distinct.
 
+### CPU automatic gradients
+
+Install `pip install 'pysip[jax]'` (or `poetry install --extras jax`) and call
+`reg.fit(df, backend="jax")` to use CPU float64 automatic gradients. The default
+`backend="scipy"` remains the square-root likelihood reference. Both paths use
+the same model equations, priors, penalties, and parameter coordinates; SciPy
+still performs optimization and computes fitted summaries.
+
+The JAX path supports missing/correlated outputs and zero process or initial
+covariance when observed innovations remain positive definite. It does not
+add jitter or silently substitute another backend. Custom models, priors, and
+transforms must be differentiable; see the [advanced guide](docs/content/advanced.md).
+Each fit compiles an objective for its model and data, then reuses it throughout
+optimization. GPU execution is not enabled.
+
 ## IMPORTANT - Migration to v1.0.0
 
 The version 1.0.0 of pySIP is a major update of the library. It focused on

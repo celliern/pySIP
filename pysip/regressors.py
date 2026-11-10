@@ -305,6 +305,7 @@ class Regressor:
         hpd: float = 0.95,
         jac: Literal["2-point", "3-point", "cs"] | Callable[..., np.ndarray] | bool | None = "3-point",
         method: str | Callable[..., OptimizeResult] = "BFGS",
+        backend: Literal["scipy", "jax"] = "scipy",
         **minimize_options: Any,
     ) -> tuple[pd.DataFrame, pd.DataFrame, OptimizeResult]:
         """Estimate the parameters of the state-space model.
@@ -330,6 +331,11 @@ class Regressor:
             Gradient specification forwarded to scipy.optimize.minimize.
         method : str or callable, optional
             Optimization method; defaults to BFGS.
+        backend : {'scipy', 'jax'}, optional
+            SciPy finite differences by default; 'jax' selects CPU float64
+            automatic gradients through the shared model equations. Install
+            the optional 'jax' extra. Custom models must support immutable
+            updates or supply pure continuous/discrete covariance methods.
         minimize_options : dict, optional
             Options for the minimization method. See `scipy.optimize.minimize` for
             details. Compared to the original `scipy.optimize.minimize` function, the
@@ -351,6 +357,10 @@ class Regressor:
             to the model; ``summary_``, ``corr_`` and ``results_`` are stored
             on this object.
         """
+        if backend not in ("scipy", "jax"):
+            raise ValueError("backend must be 'scipy' or 'jax'")
+        if backend == "jax" and jac is not True and jac != "3-point":
+            raise ValueError("backend='jax' supplies its own gradient; omit jac")
         if options is not None:
             warnings.warn(
                 "Use of the options argument is deprecated and will raise an error in "
@@ -362,11 +372,25 @@ class Regressor:
 
         self.parameters.eta_free = self.parameters.init_parameters(1, init, hpd)
         data = self.prepare_data(df)
+        target: Callable[..., Any] = self._target
+        target_args: tuple[Any, ...] = data
+        if backend == "jax":
+            try:
+                from ._jax import make_objective
+            except ModuleNotFoundError as error:
+                if error.name not in ("jax", "jaxlib"):
+                    raise
+                raise ImportError(
+                    "JAX fitting requires the optional extra: pip install 'pysip[jax]'"
+                ) from error
+            target = make_objective(self, data)
+            target_args = ()
+            jac = True
 
         results = minimize(
-            fun=self._target,
+            fun=target,
             x0=self.parameters.eta_free,
-            args=data,
+            args=target_args,
             method=method,
             jac=jac,
             options=minimize_options,

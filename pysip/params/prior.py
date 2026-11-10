@@ -78,6 +78,66 @@ class BasePrior:
             return logpdf(x, *self.shape_parameters)
         return self.scipy_dist.logpdf(x)
 
+    def jax_logpdf(self, value: Any) -> Any:
+        """Evaluate a built-in prior's log density with optional JAX support.
+
+        Parameters
+        ----------
+        value : scalar or array
+            Standardized constrained value, including a JAX tracer.
+
+        Returns
+        -------
+        logpdf : jax.Array
+            Differentiable log density with the shape of ``value``. Current
+            constructor arguments are read on each call.
+
+        Raises
+        ------
+        NotImplementedError
+            If a custom prior or factory has not overridden this method.
+
+        Notes
+        -----
+        JAX is imported lazily. Only exact built-in classes have known factory
+        semantics. Log-normal and inverse-gamma densities use native normal
+        and gamma densities with their change-of-variable Jacobians.
+        """
+        prior_type = type(self)
+        if prior_type not in _NUMERICAL_LOGPDF:
+            raise NotImplementedError(
+                f"JAX log density is unavailable for custom prior "
+                f"{prior_type.__qualname__}; override jax_logpdf(value) "
+                "with a JAX-compatible implementation of its factory."
+            )
+
+        import jax.numpy as jnp
+        from jax.scipy import stats as jax_stats
+
+        first, second = self.shape_parameters
+        if prior_type is Normal:
+            return jax_stats.norm.logpdf(value, loc=first, scale=second)
+        if prior_type is Gamma:
+            return jax_stats.gamma.logpdf(value, a=first, scale=1.0 / second)
+        if prior_type is Beta:
+            return jax_stats.beta.logpdf(value, a=first, b=second)
+        if prior_type is Uniform:
+            return jax_stats.uniform.logpdf(value, loc=first, scale=second - first)
+
+        value = jnp.asarray(value)
+        outside_support = (value <= 0.0) | jnp.isinf(value)
+        positive_value = jnp.where(outside_support, 1.0, value)
+        log_value = jnp.log(positive_value)
+        if prior_type is InverseGamma:
+            logpdf = jax_stats.gamma.logpdf(
+                1.0 / positive_value, a=first, scale=1.0 / second
+            ) - 2.0 * log_value
+        else:
+            logpdf = jax_stats.norm.logpdf(
+                log_value, loc=first, scale=second
+            ) - log_value
+        return jnp.where(outside_support, -jnp.inf, logpdf)
+
     def random(self, n: int = 1, hpd: float | None = None) -> NDArray[np.float64]:
         """Draw an array of shape (n,) in standardized constrained coordinates.
 

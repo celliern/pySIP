@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from ...params import Parameters
+from .._functional import array_set
 from ..base import RCModel
 
 
@@ -40,9 +41,9 @@ class Ti_RAcv(RCModel):
         """Mutate continuous matrices and initial moments from physical parameters."""
         R, C, A, cv, sigw, sigv, x0, sigx0, *_ = cast(Parameters, self.parameters).theta
 
-        self.A[0, 0] = -1.0 / (C * R)
-        self.B[0, :] = [1.0 / (C * R), A / C, 1.0 / C, cv / C]
-        self.Q[0, 0] = sigw
-        self.R[0, 0] = sigv
-        self.x0[0, 0] = x0
-        self.P0[0, 0] = sigx0
+        self.A = array_set(self.A, (0, 0), -1.0 / (C * R))
+        self.B = array_set(self.B, (0, slice(None)), [1.0 / (C * R), A / C, 1.0 / C, cv / C])
+        self.Q = array_set(self.Q, (0, 0), sigw)
+        self.R = array_set(self.R, (0, 0), sigv)
+        self.x0 = array_set(self.x0, (0, 0), x0)
+        self.P0 = array_set(self.P0, (0, 0), sigx0)

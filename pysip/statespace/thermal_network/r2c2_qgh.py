@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from ...params import Parameters
+from .._functional import array_set
 from ..base import RCModel
 
 
@@ -58,12 +59,12 @@ class R2C2Qgh(RCModel):
             *_,
         ) = cast(Parameters, self.parameters).theta
 
-        self.A[:] = [
+        self.A = array_set(self.A, slice(None), [
             [-(Ro + Ri) / (Cw * Ri * Ro), 1.0 / (Cw * Ri)],
             [1.0 / (Ci * Ri), -1.0 / (Ci * Ri)],
-        ]
-        self.B[:] = [[1.0 / (Cw * Ro), 1.0 / Cw, 0.0], [0.0, 1.0 / Ci, 1.0 / Ci]]
-        self.Q[self._diag] = [sigw_w, sigw_i]
-        self.R[0, 0] = sigv
-        self.x0[:, 0] = [x0_w, x0_i]
-        self.P0[self._diag] = [sigx0_w, sigx0_i]
+        ])
+        self.B = array_set(self.B, slice(None), [[1.0 / (Cw * Ro), 1.0 / Cw, 0.0], [0.0, 1.0 / Ci, 1.0 / Ci]])
+        self.Q = array_set(self.Q, self._diag, [sigw_w, sigw_i])
+        self.R = array_set(self.R, (0, 0), sigv)
+        self.x0 = array_set(self.x0, (slice(None), 0), [x0_w, x0_i])
+        self.P0 = array_set(self.P0, self._diag, [sigx0_w, sigx0_i])

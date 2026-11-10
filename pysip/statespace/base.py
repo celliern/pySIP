@@ -23,6 +23,13 @@ from ..params import Parameters
 from ..utils.math import nearest_cholesky
 from ..utils.misc import Namespace
 from . import discretization
+from ._functional import (
+    ContinuousMatrices,
+    evaluate_matrices,
+)
+from ._functional import (
+    discrete_covariance as _discrete_covariance,
+)
 
 model_registry = Namespace()
 
@@ -414,6 +421,58 @@ Parameters:
     def update(self) -> None:
         """Mutate continuous matrices and initial moments from physical parameters."""
         self.update_continuous_ssm()
+
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Evaluate physical parameters without mutating this model.
+
+        Parameters
+        ----------
+        theta : array_like
+            All physical parameters, including fixed leaves, in flattened order.
+        xp : module, optional
+            NumPy or jax.numpy. Custom JAX models must use immutable array updates
+            or override this method with a pure definition.
+
+        Returns
+        -------
+        ContinuousMatrices
+            A/B/C/D, full diffusion and measurement covariances, initial column
+            mean, and full initial covariance. Covariances are not factors.
+        """
+        try:
+            return evaluate_matrices(self, theta, xp)
+        except (TypeError, ValueError) as error:
+            if xp is np:
+                raise
+            raise TypeError(
+                f"{type(self).__name__} cannot evaluate immutable model matrices; "
+                "use array_set for indexed updates or implement continuous_matrices"
+            ) from error
+
+    def discrete_covariance(
+        self, theta: Any, dt: Any, *, xp: Any = np,
+    ) -> tuple[Any, Any, Any, Any]:
+        """Return discrete A/B0/B1 and full process covariance without mutation.
+
+        Parameters
+        ----------
+        theta : array_like
+            All physical parameters in flattened order.
+        dt : float
+            Sampling interval in the model's time unit.
+        xp : module, optional
+            NumPy or jax.numpy.
+
+        Returns
+        -------
+        tuple
+            Transition, input-value and input-derivative matrices, and full
+            process covariance. Custom discretization overrides must implement
+            this pure counterpart explicitly.
+        """
+        return _discrete_covariance(
+            self.continuous_matrices(theta, xp=xp), dt, self.hold_order, xp
+        )
 
     def get_discrete_ssm(self, dt: float) -> DiscreteStates:
         """Update continuous matrices and return their discretization at ``dt``.

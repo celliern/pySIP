@@ -2,11 +2,18 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 
 from ..params import Parameters
+from ._functional import (
+    ContinuousMatrices,
+    apply_covariances,
+    array_set,
+    block_diag,
+    model_covariances,
+)
 from .base import GPModel, Node, Par, RCModel, StateSpace
 
 
@@ -115,31 +122,61 @@ class LatentForceModel(StateSpace):
         self._rc.set_constant_continuous_ssm()
         self._gp.set_constant_continuous_ssm()
 
+    def _combine_continuous(self, rc: ContinuousMatrices, gp: ContinuousMatrices, *, xp: Any = np) -> ContinuousMatrices:
+        """Replace the selected RC input by a latent GP observation.
+
+        Parameters
+        ----------
+        rc, gp : ContinuousMatrices
+            Thermal and latent-process covariance realizations.
+        xp : module, optional
+            Array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Augmented realization retaining only nonlatent external inputs.
+        """
+        nr, ng = rc.A.shape[0], gp.A.shape[0]
+        a = block_diag(rc.A, gp.A, xp=xp)
+        a = array_set(a, (slice(None, nr), slice(nr, None)), rc.B[:, self.idx] @ gp.C)
+        b = xp.concatenate((rc.B[:, ~self.idx], xp.zeros((ng, self.nu))), axis=0)
+        c = xp.concatenate((rc.C, rc.D[:, self.idx] @ gp.C), axis=1)
+        return ContinuousMatrices(
+            a, b, c, rc.D[:, ~self.idx],
+            block_diag(rc.Qc, gp.Qc, xp=xp), rc.Rc,
+            xp.concatenate((rc.x0, gp.x0), axis=0),
+            block_diag(rc.P0c, gp.P0c, xp=xp),
+        )
+
     def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
+        """Refresh children and factor the shared augmented covariance realization."""
         self._rc.update_continuous_ssm()
         self._gp.update_continuous_ssm()
+        apply_covariances(self, self._combine_continuous(
+            model_covariances(self._rc), model_covariances(self._gp)
+        ))
 
-        self.A[: self._rc.nx, : self._rc.nx] = self._rc.A
-        self.A[self._rc.nx :, self._rc.nx :] = self._gp.A
-        self.A[: self._rc.nx, self._rc.nx :] = self._rc.B[:, self.idx] @ self._gp.C
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Evaluate the augmented covariance realization without mutating children.
 
-        self.B[: self._rc.nx, :] = self._rc.B[:, ~self.idx]
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in thermal-then-GP flattened order.
+        xp : module, optional
+            Array namespace.
 
-        self.C[:, : self._rc.nx] = self._rc.C
-
-        self.D = self._rc.D[:, ~self.idx]
-
-        self.Q[: self._rc.nx, : self._rc.nx] = self._rc.Q
-        self.Q[self._rc.nx :, self._rc.nx :] = self._gp.Q
-
-        self.R = self._rc.R
-
-        self.x0[: self._rc.nx] = self._rc.x0
-        self.x0[self._rc.nx :] = self._gp.x0
-
-        self.P0[: self._rc.nx, : self._rc.nx] = self._rc.P0
-        self.P0[self._rc.nx :, self._rc.nx :] = self._gp.P0
+        Returns
+        -------
+        ContinuousMatrices
+            Coupled continuous realization with full covariances.
+        """
+        split = len(self._rc.params)
+        return self._combine_continuous(
+            self._rc.continuous_matrices(theta[:split], xp=xp),
+            self._gp.continuous_matrices(theta[split:], xp=xp), xp=xp,
+        )
 
 
 @dataclass
@@ -189,7 +226,7 @@ class R2C2_Qgh_Matern32(RCModel):
 
     def set_constant_continuous_ssm(self) -> None:
         """Mutate parameter-independent continuous matrices in place."""
-        self.C[0, 1] = 1.0
+        self.C = array_set(self.C, (0, 1), 1.0)
 
     def update_continuous_ssm(self) -> None:
         """Mutate continuous matrices and initial moments from physical parameters."""
@@ -210,19 +247,19 @@ class R2C2_Qgh_Matern32(RCModel):
             *_,
         ) = cast(Parameters, self.parameters).theta
 
-        self.A[:] = [
+        self.A = array_set(self.A, slice(None), [
             [-(Ro + Ri) / (Cw * Ri * Ro), 1.0 / (Cw * Ri), 1.0 / Cw, 0.0],
             [1.0 / (Ci * Ri), -1.0 / (Ci * Ri), 1.0 / Ci, 0.0],
             [0.0, 0.0, 0.0, 1.0],
             [0.0, 0.0, -3.0 / lscale**2, -2.0 * 3.0**0.5 / lscale],
-        ]
-        self.B[:2, :] = [[1.0 / (Cw * Ro), 0.0], [0.0, 1.0 / Ci]]
-        self.Q[self._diag] = [
+        ])
+        self.B = array_set(self.B, (slice(None, 2), slice(None)), [[1.0 / (Cw * Ro), 0.0], [0.0, 1.0 / Ci]])
+        self.Q = array_set(self.Q, self._diag, [
             sigw_w,
             sigw_i,
             0.0,
             2.0 * 3.0**0.75 * mscale / lscale**1.5,
-        ]
-        self.R[0, 0] = sigv
-        self.x0[:2, 0] = [x0_w, x0_i]
-        self.P0[self._diag] = [sigx0_w, sigx0_i, mscale, 3.0**0.5 * mscale / lscale]
+        ])
+        self.R = array_set(self.R, (0, 0), sigv)
+        self.x0 = array_set(self.x0, (slice(None, 2), 0), [x0_w, x0_i])
+        self.P0 = array_set(self.P0, self._diag, [sigx0_w, sigx0_i, mscale, 3.0**0.5 * mscale / lscale])

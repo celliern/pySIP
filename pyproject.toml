@@ -24,6 +24,10 @@ loguru = "^0.7.3"
 makefun = "^1.16"
 xarray = ">=2026.9,<2027"
 typing-extensions = "^4.16"
+jax = {version = ">=0.12.0.1,<0.13", optional = true}
+
+[tool.poetry.extras]
+jax = ["jax"]
 
 
 [tool.poetry.group.docs.dependencies]

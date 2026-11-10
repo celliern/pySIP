@@ -4,10 +4,11 @@ from dataclasses import dataclass, field
 from typing import cast
 
 import numpy as np
-from scipy.special import iv
 
 from ...params import Parameters
+from .._functional import array_namespace, array_set
 from ..base import GPModel
+from ._bessel import periodic_scales
 
 
 @dataclass
@@ -52,7 +53,7 @@ class QuasiPeriodic12(GPModel):
 
     def set_constant_continuous_ssm(self) -> None:
         """Mutate parameter-independent continuous matrices in place."""
-        self.C[0, ::2] = 1.0
+        self.C = array_set(self.C, (0, slice(None, None, 2)), 1.0)
         self._kron = np.kron(
             np.diag(range(self.J + 1)),
             np.array([[0.0, -2.0 * np.pi], [2.0 * np.pi, 0.0]]),
@@ -62,24 +63,14 @@ class QuasiPeriodic12(GPModel):
         """Mutate continuous matrices and initial moments from physical parameters."""
         period, mscale, lscale, sigv, decay, *_ = cast(Parameters, self.parameters).theta
 
-        self.A[:] = self._kron / period + np.kron(
-            np.eye(self.J + 1), np.array([[-1.0 / decay, 0.0], [0.0, -1.0 / decay]])
-        )
-
-        q2 = (
-            2.0
-            * mscale**2
-            * np.exp(-(lscale ** (-2)))
-            * iv(range(self.J + 1), lscale ** (-2))
-        )
-        q2[0] *= 0.5
-
-        if not np.all(np.isfinite(q2)):
-            raise ValueError("Spectral variance coefficients are not finite!")
-
-        self.R[0, 0] = sigv
-        self.P0[self._diag] = np.repeat(np.sqrt(q2), 2)
-        self.Q[:] = self.P0 * 2.0**0.5 * decay ** (-0.5)
+        xp = array_namespace(self.A)
+        self.A = array_set(self.A, slice(None), self._kron / period + xp.kron(
+            xp.eye(self.J + 1), xp.asarray([[-1.0 / decay, 0.0], [0.0, -1.0 / decay]])
+        ))
+        scales = periodic_scales(mscale, lscale, self.J, xp=xp)
+        self.R = array_set(self.R, (0, 0), sigv)
+        self.P0 = array_set(self.P0, self._diag, xp.repeat(scales, 2))
+        self.Q = array_set(self.Q, slice(None), self.P0 * 2.0**0.5 * decay ** (-0.5))
 
 
 @dataclass
@@ -127,7 +118,7 @@ class QuasiPeriodic32(GPModel):
 
     def set_constant_continuous_ssm(self) -> None:
         """Mutate parameter-independent continuous matrices in place."""
-        self.C[0, ::4] = 1.0
+        self.C = array_set(self.C, (0, slice(None, None, 4)), 1.0)
         two_pi = 2.0 * np.pi
         self._kron = np.kron(
             np.diag(range(self.J + 1)),
@@ -145,11 +136,12 @@ class QuasiPeriodic32(GPModel):
         """Mutate continuous matrices and initial moments from physical parameters."""
         period, mscale, lscale, sigv, decay, *_ = cast(Parameters, self.parameters).theta
 
+        xp = array_namespace(self.A)
         tmp1 = -3.0 / decay**2
         tmp2 = -2.0 * 3.0**0.5 / decay
-        self.A[:] = self._kron / period + np.kron(
-            np.eye(self.J + 1),
-            np.array(
+        self.A = array_set(self.A, slice(None), self._kron / period + xp.kron(
+            xp.eye(self.J + 1),
+            xp.asarray(
                 [
                     [0.0, 1.0, 0.0, 0.0],
                     [tmp1, tmp2, 0.0, 0.0],
@@ -157,22 +149,13 @@ class QuasiPeriodic32(GPModel):
                     [0.0, 0.0, tmp1, tmp2],
                 ]
             ),
-        )
-
-        q2 = (
-            2.0
-            * mscale**2
-            * np.exp(-(lscale ** (-2)))
-            * iv(range(self.J + 1), lscale ** (-2))
-        )
-        q2[0] *= 0.5
-
-        if not np.all(np.isfinite(q2)):
-            raise ValueError("Spectral variance coefficients are not finite!")
-
-        self.R[0, 0] = sigv
-        _P0 = np.kron(np.diag(np.sqrt(q2)), np.eye(2))
-        self.Q[:] = np.kron(
-            _P0, np.array([[0.0, 0.0], [0.0, 2.0 * 3.0**0.75 / decay**1.5]])
-        )
-        self.P0[:] = np.kron(_P0, np.array([[1.0, 0.0], [0.0, 3.0**0.5 / decay]]))
+        ))
+        scales = periodic_scales(mscale, lscale, self.J, xp=xp)
+        self.R = array_set(self.R, (0, 0), sigv)
+        _P0 = xp.kron(xp.diag(scales), xp.eye(2))
+        self.Q = array_set(self.Q, slice(None), xp.kron(
+            _P0, xp.asarray([[0.0, 0.0], [0.0, 2.0 * 3.0**0.75 / decay**1.5]])
+        ))
+        self.P0 = array_set(self.P0, slice(None), xp.kron(
+            _P0, xp.asarray([[1.0, 0.0], [0.0, 3.0**0.5 / decay]])
+        ))

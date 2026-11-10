@@ -3,11 +3,13 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from itertools import product
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 
 from ...params import Parameters
+from ...utils.math import nearest_cholesky
+from .._functional import ContinuousMatrices, apply_covariances, model_covariances
 from ..base import GPModel, Node, Par
 
 
@@ -85,9 +87,6 @@ class GPProduct(GPModel):
         else:
             self.outputs = [("ANY", "f(t)", "stochastic processes")]
 
-        self._I1 = np.eye(self._gp1.nx)
-        self._I2 = np.eye(self._gp2.nx)
-
         super().__post_init__()
 
     def set_constant_continuous_ssm(self) -> None:
@@ -95,39 +94,130 @@ class GPProduct(GPModel):
         self._gp1.set_constant_continuous_ssm()
         self._gp2.set_constant_continuous_ssm()
 
+    def _combine_continuous(self, left: ContinuousMatrices, right: ContinuousMatrices, *, xp: Any = np) -> ContinuousMatrices:
+        """Combine child covariance realizations using the product kernel law.
+
+        Parameters
+        ----------
+        left, right : ContinuousMatrices
+            Child continuous covariance realizations.
+        xp : module, optional
+            Array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Kronecker product realization with full covariances.
+        """
+        nx1, nx2 = left.A.shape[0], right.A.shape[0]
+        return ContinuousMatrices(
+            xp.kron(left.A, xp.eye(nx2)) + xp.kron(xp.eye(nx1), right.A),
+            xp.zeros((nx1 * nx2, 0)),
+            xp.kron(left.C, right.C),
+            xp.zeros((left.C.shape[0] * right.C.shape[0], 0)),
+            xp.kron(left.Qc, right.P0c) + xp.kron(left.P0c, right.Qc),
+            left.Rc,
+            xp.asarray(self.x0),
+            xp.kron(left.P0c, right.P0c),
+        )
+
+    @staticmethod
+    def _combine_discrete(a1: Any, q1: Any, p1: Any, a2: Any, q2: Any, p2: Any, *, xp: Any = np) -> tuple[Any, Any, Any, Any]:
+        """Combine positive covariance increments without stationary subtraction.
+
+        Parameters
+        ----------
+        a1, a2 : array
+            Child transitions.
+        q1, q2 : array
+            Child discrete diffusion covariances.
+        p1, p2 : array
+            Child stationary covariances.
+        xp : module, optional
+            Array namespace.
+
+        Returns
+        -------
+        tuple
+            Transition, empty input matrices, and product diffusion covariance.
+        """
+        a = xp.kron(a1, a2)
+        q = xp.kron(q1, p2) + xp.kron(a1 @ p1 @ a1.T, q2)
+        b = xp.zeros((a.shape[0], 0))
+        return a, b, b, q
+
     def update_continuous_ssm(self) -> None:
-        """Refresh product dynamics and factor the sum of child diffusion rates."""
+        """Refresh child realizations and factor the shared product covariance law."""
         self._gp1.update_continuous_ssm()
         self._gp2.update_continuous_ssm()
+        apply_covariances(self, self._combine_continuous(
+            model_covariances(self._gp1), model_covariances(self._gp2)
+        ))
 
-        self.A = np.kron(self._gp1.A, self._I2) + np.kron(self._I1, self._gp2.A)
-        self.C = np.kron(self._gp1.C, self._gp2.C)
-        self.Q = np.linalg.qr(
-            np.vstack((
-                np.kron(self._gp1.Q, self._gp2.P0),
-                np.kron(self._gp1.P0, self._gp2.Q),
-            )),
-            mode="r",
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Evaluate the product covariance realization without mutating either child.
+
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in flattened child order.
+        xp : module, optional
+            Array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Product realization with full covariances, never QR factors.
+        """
+        split = len(self._gp1.params)
+        return self._combine_continuous(
+            self._gp1.continuous_matrices(theta[:split], xp=xp),
+            self._gp2.continuous_matrices(theta[split:], xp=xp), xp=xp,
         )
-        self.R = self._gp1.R
-        self.P0 = np.kron(self._gp1.P0, self._gp2.P0)
 
-    def discretization(
-        self, dt: float
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Compose product covariance from positive semidefinite child increments.
+    def discrete_covariance(self, theta: Any, dt: Any, *, xp: Any = np) -> tuple[Any, Any, Any, Any]:
+        """Recursively evaluate product transition and diffusion covariance.
 
-        P1⊗P2 - (A1 P1 A1.T)⊗(A2 P2 A2.T) equals
-        Q1⊗P2 + (A1 P1 A1.T)⊗Q2, without stationary subtraction.
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in flattened child order.
+        dt : scalar
+            Sampling interval.
+        xp : module, optional
+            Array namespace.
+
+        Returns
+        -------
+        tuple
+            Transition, input matrices, and diffusion covariance.
+        """
+        split = len(self._gp1.params)
+        theta1, theta2 = theta[:split], theta[split:]
+        a1, _, _, q1 = self._gp1.discrete_covariance(theta1, dt, xp=xp)
+        a2, _, _, q2 = self._gp2.discrete_covariance(theta2, dt, xp=xp)
+        return self._combine_discrete(
+            a1, q1, self._gp1.continuous_matrices(theta1, xp=xp).P0c,
+            a2, q2, self._gp2.continuous_matrices(theta2, xp=xp).P0c, xp=xp,
+        )
+
+    def discretization(self, dt: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Factor the same recursive covariance law used by the pure evaluator.
+
+        Parameters
+        ----------
+        dt : float
+            Sampling interval.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            Transition, input matrices, and upper diffusion factor.
         """
         a1, _, _, q1 = self._gp1.discretization(dt)
         a2, _, _, q2 = self._gp2.discretization(dt)
-        q = np.linalg.qr(
-            np.vstack((
-                np.kron(q1, self._gp2.P0),
-                np.kron(self._gp1.P0 @ a1.T, q2),
-            )),
-            mode="r",
+        a, b0, b1, q = self._combine_discrete(
+            a1, q1.T @ q1, self._gp1.P0.T @ self._gp1.P0,
+            a2, q2.T @ q2, self._gp2.P0.T @ self._gp2.P0,
         )
-        b = np.zeros((self.nx, self.nu))
-        return np.kron(a1, a2), b, b, q
+        return a, b0, b1, cast(np.ndarray, nearest_cholesky(q))

@@ -16,7 +16,7 @@ jobs:
       - name: Install poetry
         run: pip install poetry==2.5.1
       - name: Install dependencies
-        run: poetry install --only main,tests,dev
+        run: poetry install --only main,tests,dev --extras jax
       - name: Type check
         run: poetry run pyright --pythonversion ${{ matrix.python-version }}
       - name: Test

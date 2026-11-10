@@ -315,6 +315,57 @@ class Ti_RA(RCModel):
         self.P0[0, 0] = sigx0
 ```
 
+### Opt-in CPU JAX fitting
+
+Install `pysip[jax]`, then use `reg.fit(df, backend="jax", disp=False)`.
+The default `backend="scipy"` is retained as the square-root numerical reference.
+JAX computes the full posterior gradient in CPU float64; SciPy still runs BFGS
+and produces parameter estimates, standard errors, and correlations. The
+backend supplies its own gradient, so omit the `jac` argument.
+
+Built-in thermal, Gaussian-process, composed-kernel, and latent-force models
+share their model equations between backends. Priors and penalties are evaluated
+on standardized constrained parameters, including the existing physical
+location/scale mapping. Fixed leaves are excluded from optimization. All built-in
+transforms and six built-in prior families are supported.
+
+The covariance-form JAX filter marginalizes missing channels of correlated
+outputs. Zero initial and process covariances are valid when the observed
+innovation covariance is positive definite. Singular innovations or nonfinite
+objectives/gradients raise explicit errors; no noise jitter, covariance clipping,
+or silent fallback changes the statistical model.
+
+Custom models using in-place updates continue to work with the default backend.
+To make the same equations traceable, import `array_set` and `array_namespace`
+from `pysip.statespace`. Replace dynamic indexed writes such as
+`self.A[0, 0] = value` with
+`self.A = array_set(self.A, (0, 0), value)`, and use
+`xp = array_namespace(self.A)` instead of NumPy for parameter-dependent array
+operations. Constant initialization can remain NumPy.
+
+`ContinuousMatrices` is also exported from `pysip.statespace`.
+
+Alternatively, implement `continuous_matrices(theta, *, xp)` as a pure function
+returning `ContinuousMatrices(A, B, C, D, Qc, Rc, x0, P0c)`: the three `*c`
+matrices are **full covariances**, not upper factors, and `theta` contains all
+physical parameters in flattened order. Override `discrete_covariance(theta,
+dt, *, xp)` as well if your model customizes discretization; its last result
+is the full discrete process covariance. Define equations once and let the
+mutable reference update call that same definition.
+
+Custom prior subclasses must provide `jax_logpdf(value)`; their arbitrary
+SciPy factories cannot be automatically differentiated. Custom transforms
+must accept `xp` in their `untransform` and `penalty` methods. Unsupported
+customizations fail explicitly rather than using an unrelated built-in prior
+or ignoring custom discretization.
+
+Compilation occurs inside each fit and depends on the model and prepared data.
+The compiled objective is reused for optimizer iterations, not cached across
+independent fits. Local x64/CPU contexts do not change global JAX settings.
+The standard `predict`, filtering, simulation, and Bayesian interfaces remain
+unchanged. GPU and Julia execution are outside this backend.
+
+
 In the `set_constant_continuous_ssm` method, you define the constant part of the
 continuous matrices. In the `update_continuous_ssm` method, you define the
 dynamic part of the continuous matrices that needs to be updated at each

@@ -7,7 +7,7 @@ transform names do not validate compatibility with supplied bounds.
 """
 
 from abc import ABCMeta, abstractmethod
-from typing import TYPE_CHECKING, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
 import numpy as np
 
@@ -72,14 +72,19 @@ class ParameterTransform(metaclass=ABCMeta):
         """
 
     @abstractmethod
-    def untransform(self, η: float) -> float:
+    def untransform(self, η: Any, *, xp: Any = np) -> Any:
         """Transform unconstrained η to standardized constrained θ_sd.
 
-        ``η`` is the scalar unconstrained parameter value.
+        ``η`` is the unconstrained scalar or array parameter.
+
+        Parameters
+        ----------
+        xp : module, optional
+            NumPy-compatible namespace; defaults to NumPy.
 
         Returns
         -------
-        θ : float
+        float or array
             Standardized constrained parameter value θ_sd.
         """
 
@@ -108,15 +113,20 @@ class ParameterTransform(metaclass=ABCMeta):
         """
 
     @abstractmethod
-    def penalty(self, θ: float) -> float:
-        """Penalty for the parameter value θ
+    def penalty(self, θ: Any, *, xp: Any = np) -> Any:
+        """Compute the boundary penalty in standardized coordinates.
 
-        ``θ`` is the scalar standardized constrained value θ_sd.
+        ``θ`` is the standardized constrained scalar or array parameter.
+
+        Parameters
+        ----------
+        xp : module, optional
+            NumPy-compatible namespace; defaults to NumPy.
 
         Returns
         -------
-        penalty : float
-            Penalty for the parameter value θ
+        penalty : float or array
+            Penalty for the parameter value θ.
         """
 
     @abstractmethod
@@ -167,7 +177,7 @@ class NoneTransform(ParameterTransform):
         """Return θ_sd unchanged."""
         return θ
 
-    def untransform(self, η: float) -> float:
+    def untransform(self, η: Any, *, xp: Any = np) -> Any:
         """Return η unchanged as θ_sd."""
         return η
 
@@ -179,7 +189,7 @@ class NoneTransform(ParameterTransform):
         """Return the identity inverse derivative."""
         return 1.0
 
-    def penalty(self, θ: float) -> float:
+    def penalty(self, θ: Any, *, xp: Any = np) -> Any:
         """Return zero penalty regardless of supplied bounds."""
         return 0.0
 
@@ -205,9 +215,9 @@ class LogTransform(ParameterTransform):
         """Return log(θ_sd)."""
         return np.log(θ)
 
-    def untransform(self, η: float) -> float:
-        """Return exp(η) in standardized coordinates."""
-        return np.exp(η)
+    def untransform(self, η: Any, *, xp: Any = np) -> Any:
+        """Return exp(η) in standardized coordinates using ``xp``."""
+        return xp.exp(η)
 
     def grad_transform(self, θ: float) -> float:
         """Return dη/dθ_sd = 1/θ_sd."""
@@ -217,7 +227,7 @@ class LogTransform(ParameterTransform):
         """Return dθ_sd/dη = exp(η)."""
         return np.exp(η)
 
-    def penalty(self, θ: float) -> float:
+    def penalty(self, θ: Any, *, xp: Any = np) -> Any:
         """Return the logarithmic transform's near-zero boundary penalty."""
         return 1e-12 / (θ - 1e-12)
 
@@ -236,9 +246,9 @@ class LowerTransform(ParameterTransform):
         """Return log(θ_sd - lb)."""
         return np.log(θ - cast(float, self.lb))
 
-    def untransform(self, η: float) -> float:
-        """Return exp(η) + lb in standardized coordinates."""
-        return np.exp(η) + cast(float, self.lb)
+    def untransform(self, η: Any, *, xp: Any = np) -> Any:
+        """Return exp(η) + lb in standardized coordinates using ``xp``."""
+        return xp.exp(η) + cast(float, self.lb)
 
     def grad_transform(self, θ: float) -> float:
         """Return dη/dθ_sd = 1/(θ_sd - lb)."""
@@ -248,7 +258,7 @@ class LowerTransform(ParameterTransform):
         """Return dθ_sd/dη = exp(η)."""
         return np.exp(η)
 
-    def penalty(self: ParameterTransform, θ: float) -> float:
+    def penalty(self: ParameterTransform, θ: Any, *, xp: Any = np) -> Any:
         """Return the reciprocal-distance penalty above a finite lb."""
         lb = cast(float, self.lb)
         return abs(lb) / (θ - lb)
@@ -273,9 +283,9 @@ class UpperTransform(ParameterTransform):
         """Return log(ub - θ_sd)."""
         return np.log(cast(float, self.ub) - θ)
 
-    def untransform(self, η: float) -> float:
-        """Return ub - exp(η) in standardized coordinates."""
-        return cast(float, self.ub) - np.exp(η)
+    def untransform(self, η: Any, *, xp: Any = np) -> Any:
+        """Return ub - exp(η) in standardized coordinates using ``xp``."""
+        return cast(float, self.ub) - xp.exp(η)
 
     def grad_transform(self, θ: float) -> float:
         """Return dη/dθ_sd = -1/(ub - θ_sd)."""
@@ -285,7 +295,7 @@ class UpperTransform(ParameterTransform):
         """Return dθ_sd/dη = -exp(η)."""
         return -np.exp(η)
 
-    def penalty(self: ParameterTransform, θ: float) -> float:
+    def penalty(self: ParameterTransform, θ: Any, *, xp: Any = np) -> Any:
         """Return the reciprocal-distance penalty below a finite ub."""
         ub = cast(float, self.ub)
         return abs(ub) / (ub - θ)
@@ -310,10 +320,10 @@ class LogitTransform(ParameterTransform):
         """Return log((θ_sd - lb)/(ub - θ_sd))."""
         return np.log((θ - cast(float, self.lb)) / (cast(float, self.ub) - θ))
 
-    def untransform(self, η: float) -> float:
-        """Return the bounded logistic inverse at η."""
+    def untransform(self, η: Any, *, xp: Any = np) -> Any:
+        """Return the bounded logistic inverse at η using ``xp``."""
         lb, ub = cast(float, self.lb), cast(float, self.ub)
-        return lb + (ub - lb) / (1 + np.exp(-η))
+        return lb + (ub - lb) / (1 + xp.exp(-η))
 
     def grad_transform(self, θ: float) -> float:
         """Return dη/dθ_sd for the bounded logit."""
@@ -326,9 +336,11 @@ class LogitTransform(ParameterTransform):
         lb, ub = cast(float, self.lb), cast(float, self.ub)
         return (ub - lb) * x / (1 + x) ** 2
 
-    def penalty(self, θ: float) -> float:
+    def penalty(self, θ: Any, *, xp: Any = np) -> Any:
         """Sum lower- and upper-bound penalties at θ_sd."""
-        return UpperTransform.penalty(self, θ) + LowerTransform.penalty(self, θ)
+        return UpperTransform.penalty(self, θ, xp=xp) + LowerTransform.penalty(
+            self, θ, xp=xp
+        )
 
     def grad_penalty(self, θ: float) -> float:
         """Sum bound-penalty derivatives with respect to θ_sd."""

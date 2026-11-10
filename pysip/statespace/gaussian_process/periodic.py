@@ -1,13 +1,14 @@
 """Finite harmonic approximation of the periodic covariance kernel."""
 
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
-from scipy.special import iv
 
 from ...params import Parameters
+from .._functional import array_namespace, array_set
 from ..base import GPModel
+from ._bessel import periodic_scales
 
 
 @dataclass
@@ -52,7 +53,7 @@ class Periodic(GPModel):
 
     def set_constant_continuous_ssm(self) -> None:
         """Mutate parameter-independent continuous matrices in place."""
-        self.C[0, ::2] = 1.0
+        self.C = array_set(self.C, (0, slice(None, None, 2)), 1.0)
         self._kron = np.kron(
             np.diag(range(self.J + 1)),
             np.array([[0.0, -2.0 * np.pi], [2.0 * np.pi, 0.0]]),
@@ -62,17 +63,67 @@ class Periodic(GPModel):
         """Mutate continuous matrices and initial moments from physical parameters."""
         period, mscale, lscale, sigv, *_ = cast(Parameters, self.parameters).theta
 
-        q2 = (
-            2.0
-            * mscale**2
-            * np.exp(-(lscale ** (-2)))
-            * iv(range(self.J + 1), lscale ** (-2))
+        xp = array_namespace(self.A)
+        scales = periodic_scales(mscale, lscale, self.J, xp=xp)
+        self.A = array_set(self.A, slice(None), self._kron / period)
+        self.R = array_set(self.R, (0, 0), sigv)
+        self.P0 = array_set(self.P0, self._diag, xp.repeat(scales, 2))
+
+    def _discrete_rotation(self, A: Any, dt: Any, *, xp: Any = np) -> tuple[Any, Any, Any, Any]:
+        """Return harmonic rotations and exactly zero input/noise increments.
+
+        Parameters
+        ----------
+        A : array
+            Continuous harmonic generator.
+        dt : scalar
+            Sampling interval.
+        xp : module, optional
+            Array namespace.
+
+        Returns
+        -------
+        tuple
+            Transition, two input matrices, and zero diffusion covariance.
+        """
+        angles = xp.diag(A[1::2, ::2]) * dt
+        rotation = xp.kron(xp.diag(xp.cos(angles)), xp.eye(2))
+        rotation = rotation + xp.kron(
+            xp.diag(xp.sin(angles)), xp.asarray([[0.0, -1.0], [1.0, 0.0]])
         )
-        q2[0] *= 0.5
+        b = xp.zeros((self.nx, self.nu))
+        return rotation, b, b, xp.zeros((self.nx, self.nx))
 
-        if not np.all(np.isfinite(q2)):
-            raise ValueError("Spectral variance coefficients are not finite!")
+    def discrete_covariance(self, theta: Any, dt: Any, *, xp: Any = np) -> tuple[Any, Any, Any, Any]:
+        """Return exact harmonic transitions and zero diffusion covariance.
 
-        self.A[:] = self._kron / period
-        self.R[0, 0] = sigv
-        self.P0[self._diag] = np.repeat(np.sqrt(q2), 2)
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in model order.
+        dt : scalar
+            Sampling interval.
+        xp : module, optional
+            Array namespace.
+
+        Returns
+        -------
+        tuple
+            Transition, input matrices, and diffusion covariance.
+        """
+        return self._discrete_rotation(self.continuous_matrices(theta, xp=xp).A, dt, xp=xp)
+
+    def discretization(self, dt: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return exact rotations and zero diffusion factors for current matrices.
+
+        Parameters
+        ----------
+        dt : float
+            Sampling interval.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            Transition, input matrices, and the zero diffusion factor.
+        """
+        return self._discrete_rotation(self.A, dt)

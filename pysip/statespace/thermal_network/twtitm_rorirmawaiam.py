@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from ...params import Parameters
+from .._functional import array_set
 from ..base import RCModel
 
 
@@ -76,17 +77,17 @@ class TwTiTm_RoRiRmAwAiAm(RCModel):
             *_,
         ) = cast(Parameters, self.parameters).theta
 
-        self.A[:] = [
+        self.A = array_set(self.A, slice(None), [
             [-(Ro + Ri) / (Cw * Ri * Ro), 1.0 / (Cw * Ri), 0.0],
             [1.0 / (Ci * Ri), -(Ri + Rm) / (Ci * Ri * Rm), 1.0 / (Ci * Rm)],
             [0.0, 1.0 / (Cm * Rm), -1.0 / (Cm * Rm)],
-        ]
-        self.B[:] = [
+        ])
+        self.B = array_set(self.B, slice(None), [
             [1.0 / (Cw * Ro), Aw / Cw, 0.0],
             [0.0, Ai / Ci, 1.0 / Ci],
             [0.0, Am / Cm, 0.0],
-        ]
-        self.Q[self._diag] = [sigw_w, sigw_i, sigw_m]
-        self.R[0, 0] = sigv
-        self.x0[:, 0] = [x0_w, x0_i, x0_m]
-        self.P0[self._diag] = [sigx0_w, sigx0_i, sigx0_m]
+        ])
+        self.Q = array_set(self.Q, self._diag, [sigw_w, sigw_i, sigw_m])
+        self.R = array_set(self.R, (0, 0), sigv)
+        self.x0 = array_set(self.x0, (slice(None), 0), [x0_w, x0_i, x0_m])
+        self.P0 = array_set(self.P0, self._diag, [sigx0_w, sigx0_i, sigx0_m])
