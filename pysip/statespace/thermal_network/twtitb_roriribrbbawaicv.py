@@ -1,19 +1,23 @@
-from dataclasses import dataclass
+"""Envelope/indoor/boundary-wall network with distinct Rib and Rbb links, solar, and ventilation heat."""
 
+from dataclasses import dataclass
+from typing import cast
+
+from ...params import Parameters
 from ..base import RCModel
 
 
 @dataclass
 class TwTiTb_RoRiRibRbbAwAicv(RCModel):
-    """Third order RC model"""
+    """Envelope/indoor/boundary-wall network with distinct Rib and Rbb links, solar, and ventilation heat."""
 
-    states = [
+    states = (
         ("TEMPERATURE", "xw", "envelope temperature"),
         ("TEMPERATURE", "xi", "indoor temperature"),
         ("TEMPERATURE", "xb", "boundary wall temperature"),
-    ]
+    )
 
-    params = [
+    params = (
         ("THERMAL_RESISTANCE", "Ro", "between the outdoor and the envelope"),
         ("THERMAL_RESISTANCE", "Ri", "between the envelope and the indoor"),
         ("THERMAL_RESISTANCE", "Rib", "between the indoor and the boundary wall"),
@@ -38,25 +42,24 @@ class TwTiTb_RoRiRibRbbAwAicv(RCModel):
         ("INITIAL_DEVIATION", "sigx0_w", "of the envelope temperature"),
         ("INITIAL_DEVIATION", "sigx0_i", "of the infoor temperature"),
         ("INITIAL_DEVIATION", "sigx0_b", "of the boundary wall temperature"),
-    ]
+    )
 
-    inputs = [
+    inputs = (
         ("TEMPERATURE", "To", "outdoor temperature"),
         ("TEMPERATURE", "Tb", "boundary temperature"),
         ("POWER", "Qgh", "solar irradiance"),
         ("POWER", "Qh", "HVAC system heat"),
         ("POWER", "Qv", "heat from the ventilation system"),
-    ]
+    )
 
-    outputs = [("TEMPERATURE", "xi", "indoor temperature")]
+    outputs = (("TEMPERATURE", "xi", "indoor temperature"),)
 
-    def __post_init__(self):
-        super().__post_init__()
-
-    def set_constant_continuous_ssm(self):
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices in place."""
         self.C[0, 1] = 1.0
 
-    def update_continuous_ssm(self):
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
         (
             Ro,
             Ri,
@@ -79,7 +82,7 @@ class TwTiTb_RoRiRibRbbAwAicv(RCModel):
             sigx0_i,
             sigx0_b,
             *_,
-        ) = self.parameters.theta
+        ) = cast(Parameters, self.parameters).theta
 
         self.A[:] = [
             [-(Ro + Ri) / (Cw * Ri * Ro), 1.0 / (Cw * Ri), 0.0],

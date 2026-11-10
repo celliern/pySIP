@@ -1,66 +1,53 @@
 import numpy as np
 import pytest
-from scipy.linalg import eig, eigvals, expm, inv
 
-from pysip.statespace.discretization import (
-    eig_2x2,
-    eigvals_2x2,
-    eigvals_3x3,
-    expm_2x2,
-    inv_2x2,
-    inv_3x3,
+from pysip.statespace import discretization
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_state_and_input_for_real_eigenvalues(n):
+    rng = np.random.default_rng(42)
+    eigenvalues = -rng.uniform(0.1, 1.0, n)
+    vectors, _ = np.linalg.qr(rng.random((n, n)))
+    A = vectors @ np.diag(eigenvalues) @ vectors.T
+    B = rng.random((n, 2))
+    dt = 0.4
+    Ad, B0, B1 = discretization.state_input(A, B, dt, 1, "analytic")
+
+    expected = vectors @ np.diag(np.exp(eigenvalues * dt)) @ vectors.T
+    np.testing.assert_allclose(Ad, expected, atol=1e-14)
+    np.testing.assert_allclose(A @ B0, (Ad - np.eye(n)) @ B, atol=1e-14)
+    np.testing.assert_allclose(A @ B1, B0 - dt * B, atol=1e-14)
+
+
+@pytest.mark.parametrize(
+    "A, expected",
+    [
+        (np.array([[0.0, 1.0], [1.0, 0.0]]),
+         np.array([[np.cosh(1.0), np.sinh(1.0)],
+                   [np.sinh(1.0), np.cosh(1.0)]])),
+        (np.array([[-1.0, 1.0], [0.0, -1.0]]),
+         np.exp(-1.0) * np.array([[1.0, 1.0], [0.0, 1.0]])),
+        (-np.eye(3), np.exp(-1.0) * np.eye(3)),
+        (np.array([[0.0, -1.0], [1.0, 0.0]]),
+         np.array([[np.cos(1.0), -np.sin(1.0)],
+                   [np.sin(1.0), np.cos(1.0)]])),
+    ],
+    ids=["equal-diagonals", "defective-repeated-eigenvalue", "repeated-eigenvalues", "complex-eigenvalues"],
 )
+def test_state_adversarial_matrices(A, expected):
+    np.testing.assert_allclose(discretization.state(A), expected, atol=1e-14)
 
 
-def random_real_eig(n):
-    """n-dimensional random matrix with real eigenvalues"""
-    D = np.diag(np.random.uniform(1e-4, 1.0, n))
-    Q, _ = np.linalg.qr(np.random.random((n, n)))
-    return Q @ D @ Q.T
-
-
-@pytest.fixture
-def random_2x2():
-    return random_real_eig(2)
-
-
-@pytest.fixture
-def random_3x3():
-    return random_real_eig(3)
-
-
-def test_inv_2x2(random_2x2):
-    assert np.allclose(inv(random_2x2), inv_2x2(random_2x2))
-
-
-def test_inv_3x3(random_3x3):
-    assert np.allclose(inv(random_3x3), inv_3x3(random_3x3))
-
-
-def test_eigvals_2x2(random_2x2):
-    assert np.allclose(np.sort(eigvals(random_2x2)), np.sort(eigvals_2x2(random_2x2)))
-
-
-def test_eigvals_3x3(random_3x3):
-    assert np.allclose(np.sort(eigvals(random_3x3)), np.sort(eigvals_3x3(random_3x3)))
-
-
-def test_eig_2x2(random_2x2):
-    X = random_2x2
-    w_truth, v_truth = eig(X)
-    w_truth_sorted = np.sort(w_truth)
-    v_truth_sorted = v_truth[:, w_truth.argsort()]
-
-    w, v = eig_2x2(X)
-    w_sorted = np.sort(w)
-    v_sorted = v[:, w.argsort()]
-
-    assert np.allclose(X, v_truth @ np.diag(w_truth) @ inv_2x2(v_truth))
-    assert np.allclose(X, v @ np.diag(w) @ inv_2x2(v))
-
-    assert np.allclose(w_truth_sorted, w_sorted)
-    assert np.allclose(np.abs(v_truth_sorted), np.abs(v_sorted))
-
-
-def test_expm_2x2(random_2x2):
-    assert np.allclose(expm(random_2x2), expm_2x2(random_2x2))
+@pytest.mark.parametrize("n", [1, 2, 3, 4])
+@pytest.mark.parametrize("order_hold", [0, 1])
+def test_singular_state_input_exponential(n, order_hold):
+    A = np.zeros((n, n))
+    B = np.arange(1.0, 2 * n + 1).reshape(n, 2)
+    dt = 0.4
+    Ad, B0, B1 = discretization.state_input(A, B, dt, order_hold)
+    np.testing.assert_allclose(Ad, np.eye(n))
+    np.testing.assert_allclose(B0, dt * B)
+    np.testing.assert_allclose(B1, dt**2 / 2 * B if order_hold else np.zeros_like(B))
+    with pytest.raises(np.linalg.LinAlgError):
+        discretization.state_input(A, B, dt, order_hold, "analytic")

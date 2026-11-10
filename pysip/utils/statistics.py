@@ -1,24 +1,23 @@
-"""Statistic functions module"""
+"""Likelihood criteria and residual correlation and spectral diagnostics."""
+from collections.abc import Sequence
+
 import numpy as np
 import scipy as sp
+from numpy.typing import ArrayLike, NDArray
 from scipy.signal import correlate
 
 
 def lrtest(
     loglik: float, loglik_sub: float, n_par: int, n_par_sub: int, negative: bool = True
-):
-    """Compute the pvalue of the likelihood ratio test
+) -> float:
+    """Return a chi-square likelihood-ratio p-value for nested models.
 
-    The likelihood ratio test compares two nested models, M_sub and M,
-    such that M_sub ⊂ M, e.g. M_sub can be obtained by setting some
-    parameters of M to 0.
-
-    Args:
-    loglik: Log-likelihood of the model M
-    loglik_sub: Log-likelihood of the sub-model, M_sub
-    n_par: Number of free parameters in M
-    n_par_sub: Number of free parameters in M_sub
-    negative: True if negative log-likelihood is used
+    ``loglik`` and ``loglik_sub`` are float log-likelihoods for the full and
+    restricted model, negated when ``negative`` is True. ``n_par`` and
+    ``n_par_sub`` are integer free-parameter counts; their difference is the
+    chi-square degrees of freedom. Equal counts are accepted (yielding NaN).
+    Incorrect scalar types raise TypeError, and ``n_par_sub > n_par`` raises
+    ValueError.
     """
     if not isinstance(loglik, float):
         raise TypeError("`loglik` must be a float")
@@ -49,7 +48,11 @@ def lrtest(
 
 
 def aic(loglik: float, n_par: int, negative: bool = True) -> float:
-    """Akaike information criterion"""
+    """Return scalar Akaike information criterion ``2*k - 2*loglik``.
+
+    ``n_par`` is integer k; ``negative`` indicates a negated float likelihood.
+    Incorrect scalar types raise TypeError. Counts are not range-validated.
+    """
     if not isinstance(loglik, float):
         raise TypeError("`loglik` must be a float")
 
@@ -64,21 +67,14 @@ def aic(loglik: float, n_par: int, negative: bool = True) -> float:
     return 2.0 * n_par - 2.0 * loglik
 
 
-def ttest(theta, sigma, N):
-    """t-test: statistical signifiance of the maximum likelihood estimates
-    :math:`\\hat{\\theta}`
+def ttest(theta: ArrayLike, sigma: ArrayLike, N: int) -> NDArray[np.float64]:
+    """Return two-sided t-test p-values for zero physical parameter values.
 
-    The following hypothesis is tested:
-    :math:`H_0: \\hat{\\theta}=0` against :math:`H_1: \\hat{\\theta} \neq 0`
-
-    Under the null hypothesis :math:`H_0`, the test quantity
-    :math:`z=\\frac{\\hat{\\theta}}{\\sigma_{\\hat{\\theta}}}
-    follows a t-distribution, centered on the null hypothesis value, with
-    :math:`N-N_p` degrees of freedom where N is the sample size and
-    :math:`N_p` the number of estimated parameters
-
-    The null hypothesis :math:`H_0`is rejected if the :math:`p_{value}` of the
-    test quantity :math:`z` is less or equal to the signifiance level defined.
+    ``theta`` and corresponding standard errors ``sigma`` are shape-(p,)
+    array-like inputs. The returned shape-(p,) float array uses ``N - p``
+    degrees of freedom, where N is the observation count. Standard errors
+    at or below zero leave NaN entries; invalid degrees of freedom also yield
+    NaN. Inputs are not modified and no significance threshold is applied.
     """
     if not isinstance(theta, np.ndarray):
         theta = np.array(theta)
@@ -92,27 +88,33 @@ def ttest(theta, sigma, N):
 
     Np = len(theta)
     pvalue = np.full(Np, np.nan)
-    pvalue[idx] = 2 * (1 - sp.stats.t.cdf(theta[idx] / sigma[idx], N - Np))
+    pvalue[idx] = 2 * sp.stats.t.sf(np.abs(theta[idx] / sigma[idx]), N - Np)
 
     return pvalue
 
 
-def ccf(x, y=None, n_lags=None, ci=0.95):
-    """Cross correlation (CCF) between two time-series x and y.
+def ccf(
+    x: np.ndarray,
+    y: np.ndarray | None = None,
+    n_lags: int | None = None,
+    ci: float = 0.95,
+) -> tuple[NDArray[np.int_], np.ndarray, NDArray[np.float64]]:
+    """Return nonnegative-lag normalized correlations and normal confidence bounds.
 
-    If only one time-series is specified, the auto correlation of x is computed.
-
-    Args:
-        x, y: Time series of length N
-        n_lags: Number of lags
-        ci: confidence interval [0, 1], by default 95%
+    ``x`` and ``y`` are equal-length shape-(N,) series; omitted y uses x
+    (autocorrelation). ``n_lags`` defaults to N-1 and must satisfy
+    ``0 <= n_lags < N``. Invalid lengths or lag counts raise ValueError.
+    ``ci`` is the normal interval probability, conventionally between 0 and 1
+    (not validated). The tuple contains lags, coefficients and positive
+    confidence half-widths, each shape ``(n_lags + 1,)``. Constant series
+    divide by zero. No inputs are modified.
     """
 
     if y is None:
         y = x
 
     N = len(x)
-    n_lags = int(n_lags) if n_lags else N - 1
+    n_lags = N - 1 if n_lags is None else int(n_lags)
 
     if len(x) != len(y):
         raise ValueError("x and y must have equal length")
@@ -120,7 +122,7 @@ def ccf(x, y=None, n_lags=None, ci=0.95):
     if n_lags >= N or n_lags < 0:
         raise ValueError(f"maxlags must belong to [1 {n_lags - 1}]")
 
-    lags = np.arange(0, N)
+    lags = np.arange(n_lags + 1)
 
     correlation_coeffs = correlate(x - np.mean(x), y - np.mean(y)) / (
         np.std(x) * np.std(y) * N
@@ -134,33 +136,34 @@ def ccf(x, y=None, n_lags=None, ci=0.95):
     return lags, correlation_coeffs[cut], confidence
 
 
-def check_ccf(lags, coeffs, confidence, threshold=0.95):
-    """CCF Test
-    Given cross-correlation coefficients values and corresponding confidence
-    interval values, check that at least a minimum of the absolute ccf values
-    fits within the confidence intervals.
+def check_ccf(
+    lags: np.ndarray,
+    coeffs: np.ndarray,
+    confidence: np.ndarray,
+    threshold: float = 0.95,
+) -> tuple[np.bool_, float]:
+    """Return ``(passed, fraction_in_band)`` for matching shape-(n,) CCF arrays.
 
-    Args:
-        lags, coeffs, confidences: outputs of the ccf function
-        threshold (float): Threshold level (0.0 - 1.0)
-
-    Returns:
-        Boolean. True if the test has succeed, False otherwise.
-        in_band: Percentage of value inside the credible intervals
+    Coefficients must satisfy ``abs(coeffs) < confidence`` to count in-band;
+    passing requires a fraction at least ``threshold`` (normally in [0, 1],
+    not validated). ``lags`` is retained for the CCF calling convention but
+    is not used. Inputs are not modified; empty coefficients divide by zero.
     """
     in_band = np.sum(np.abs(coeffs) < confidence) / len(coeffs)
     return in_band >= threshold, in_band
 
 
-def cpgram(ts):
-    """Cumulative periodogram with 95% confidence intervals
+def cpgram(
+    ts: Sequence[float] | np.ndarray,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], float]:
+    """Return ``(power, frequencies, critical_width)`` for a residual series.
 
-    Args:
-        ts: residual time series
-
-    Notes:
-        Adapted from the `R cpgram function
-        <https://www.rdocumentation.org/packages/stats/versions/3.5.3/topics/cpgram>`_
+    For a shape-(N,) real series, power is squared full-FFT magnitude divided
+    by N. An even N drops the final FFT bin, so both arrays have length N-1
+    for even N and N otherwise. Frequencies are linearly spaced from 0 to
+    0.5; they are not the FFT's native frequency bins. The scalar width uses
+    the 95% cumulative-periodogram approximation. No cumulative sum is
+    applied here and the input is not modified.
     """
     spectrum = np.fft.fft(ts)
     n = len(ts)
@@ -175,19 +178,18 @@ def cpgram(ts):
     return y, freq, crit
 
 
-def check_cpgram(y, freq, crit, threshold=0.95):
-    """Cpgram test
+def check_cpgram(
+    y: np.ndarray,
+    freq: np.ndarray,
+    crit: float,
+    threshold: float = 0.95,
+) -> tuple[np.bool_, float]:
+    """Return ``(passed, fraction_in_band)`` for periodogram arrays of shape (n,).
 
-    Given a spectrum and a criterion, check that the cumulative periodogram
-    values fits within 95% confidence intervals
-
-    Args:
-        y, freq, crit: outputs of the cpgram function
-        threshold (float): Threshold level (0.0 - 1.0)
-
-    Returns:
-        Boolean. True if the test has succeed, False otherwise.
-        in_band: Percentage of value inside the credible intervals
+    ``y``, ``freq`` and scalar ``crit`` are the outputs of `cpgram`.
+    A point is in-band when ``abs(cumsum(y)/sum(y) - 2*freq) < crit``;
+    passing requires at least ``threshold`` (normally [0, 1], not validated).
+    No inputs are modified. Zero total power or empty input divides by zero.
     """
     cum_sum = np.cumsum(y) / np.sum(y) - 2 * freq
     in_band = np.sum(np.abs(cum_sum) < crit) / len(freq)

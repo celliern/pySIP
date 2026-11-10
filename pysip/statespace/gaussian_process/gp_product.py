@@ -1,10 +1,14 @@
+"""Kronecker state-space realization of a product of temporal kernels."""
+
 from copy import deepcopy
 from dataclasses import dataclass
 from itertools import product
+from typing import cast
 
 import numpy as np
 
-from ..base import GPModel, Par
+from ...params import Parameters
+from ..base import GPModel, Node, Par
 from .periodic import Periodic
 
 
@@ -26,7 +30,8 @@ class GPProduct(GPModel):
 
     """
 
-    def __init__(self, gp1: GPModel, gp2: GPModel):
+    def __init__(self, gp1: GPModel, gp2: GPModel) -> None:
+        """Compose deep copies without mutating the supplied models."""
         if not isinstance(gp1, GPModel):
             raise TypeError("`gp1` must be an GPModel instance")
 
@@ -35,37 +40,44 @@ class GPProduct(GPModel):
 
         self._gp1 = deepcopy(gp1)
         self._gp2 = deepcopy(gp2)
+        # Both copies have completed StateSpace.__post_init__.
+        parameters1 = cast(Parameters, self._gp1.parameters)
+        parameters2 = cast(Parameters, self._gp2.parameters)
 
-        for node in self._gp2.params:
+        for node in cast(list[Node], self._gp2.params):
             if node.category == Par.MAGNITUDE_SCALE:
-                self._gp2.parameters.set_parameter(
+                parameters2.set_parameter(
                     node.name, value=1.0, transform="fixed"
                 )
             if node.category == Par.MEASURE_DEVIATION:
-                self._gp2.parameters.set_parameter(
+                parameters2.set_parameter(
                     node.name, value=0.0, transform="fixed"
                 )
 
-        self.parameters = self._gp1.parameters + self._gp2.parameters
+        self.parameters = parameters1 + parameters2
 
-        self.states = []
-        for s1, s2 in product(self._gp1.states, self._gp2.states):
+        states: list[tuple[str, str, str]] = []
+        for s1, s2 in product(
+            cast(list[Node], self._gp1.states),
+            cast(list[Node], self._gp2.states),
+        ):
             state = (
                 s1.category.name,
                 s1.name + "*" + s2.name,
                 s1.description + "*" + s2.description,
             )
-            self.states.append(state)
+            states.append(state)
+        self.states = states
 
         self.name = self._gp1.name + "__x__" + self._gp2.name
 
-        self.params = []
-        for node in self._gp1.params:
-            node.name = self._gp1.name + "__" + node.name
-            self.params.append(node.unpack())
-        for node in self._gp2.params:
-            node.name = self._gp2.name + "__" + node.name
-            self.params.append(node.unpack())
+        self.params = [
+            (node.category.name, name, node.description)
+            for node, name in zip(
+                [*cast(list[Node], self._gp1.params), *cast(list[Node], self._gp2.params)],
+                self.parameters.ids,
+            )
+        ]
 
         self.inputs = []
 
@@ -90,11 +102,13 @@ class GPProduct(GPModel):
 
         super().__post_init__()
 
-    def set_constant_continuous_ssm(self):
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices in place."""
         self._gp1.set_constant_continuous_ssm()
         self._gp2.set_constant_continuous_ssm()
 
-    def update_continuous_ssm(self):
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
         self._gp1.update_continuous_ssm()
         self._gp2.update_continuous_ssm()
 

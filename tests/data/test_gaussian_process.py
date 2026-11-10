@@ -21,9 +21,9 @@ def data_raw():
 def matern_statespace():
     return Matern32(
         [
-            dict(name="mscale", value=0.5, transform="log", prior=iGa(3, 1)),
-            dict(name="lscale", value=0.5, transform="log", prior=iGa(3, 1)),
-            dict(name="sigv", value=0.1, transform="log", prior=iGa(3, 0.1)),
+            {"name": "mscale", "value": 0.5, "transform": "log", "prior": iGa(3, 1)},
+            {"name": "lscale", "value": 0.5, "transform": "log", "prior": iGa(3, 1)},
+            {"name": "sigv", "value": 0.1, "transform": "log", "prior": iGa(3, 0.1)},
         ]
     )
 
@@ -86,5 +86,10 @@ def test_fit_predict(data_raw: pd.DataFrame, regressor: Regressor):
     )
     assert np.all(summary.iloc[:, 3] < 1e-4)
     assert np.all(summary.iloc[:, 4] < 1e-10)
-    assert float(ds_filtered["y_std"].sum()) == pytest.approx(47.071, rel=1e-2)
-    assert float(ds_smoothed["y_std"].sum()) == pytest.approx(27.7837, rel=1e-2)
+    for prediction in (ds_filtered, ds_smoothed):
+        C, R = regressor.ss.C, regressor.ss.R
+        variance = np.array([
+            np.diag(C @ covariance @ C.T + R.T @ R)
+            for covariance in prediction["P"].values
+        ])
+        np.testing.assert_allclose(prediction["y_std"].values**2, variance)

@@ -63,3 +63,11 @@ def test_docstring(model):
 
     for sec in chain(sections, subsections):
         assert sec in model.__doc__
+
+
+@model
+def test_inherited_initialization_keeps_selected_method(model):
+    instance = model(method="analytic")
+    assert instance.method == "analytic"
+    assert instance.A.shape == (instance.nx, instance.nx)
+    assert instance.C.any()

@@ -1,68 +1,68 @@
 import numpy as np
 import pytest
 
-from pysip.statespace import StateSpace, GPModel, Models, discretization
+from pysip.statespace import GPModel, Models, StateSpace, discretization
 
 sT = 3600.0 * 24.0
 
 par_rc2 = [
-    dict(name="Ro", scale=1e-2, bounds=(1e-4, None)),
-    dict(name="Ri", scale=1e-3, bounds=(1e-4, None)),
-    dict(name="Cw", scale=1e7 / sT, bounds=(1e-4, None)),
-    dict(name="Ci", scale=1e6 / sT, bounds=(1e-4, None)),
-    dict(name="Aw", scale=1e0, bounds=(1e-4, None)),
-    dict(name="Ai", scale=1e0, bounds=(1e-4, None)),
-    dict(name="cv", value=5e2, transform="fixed"),
-    dict(name="sigw_w", scale=1e-3 * sT**0.5, bounds=(1e-4, None)),
-    dict(name="sigw_i", scale=1e-3 * sT**0.5, bounds=(1e-4, None)),
-    dict(name="sigv", scale=1e-2, bounds=(1e-4, None)),
-    dict(name="x0_w", loc=15.0, scale=7.0, transform="none"),
-    dict(name="x0_i", loc=20.0, scale=7.0, transform="none"),
-    dict(name="sigx0_w", value=0.1, transform="fixed"),
-    dict(name="sigx0_i", value=0.1, transform="fixed"),
+    {"name": "Ro", "scale": 1e-2, "bounds": (1e-4, None)},
+    {"name": "Ri", "scale": 1e-3, "bounds": (1e-4, None)},
+    {"name": "Cw", "scale": 1e7 / sT, "bounds": (1e-4, None)},
+    {"name": "Ci", "scale": 1e6 / sT, "bounds": (1e-4, None)},
+    {"name": "Aw", "scale": 1e0, "bounds": (1e-4, None)},
+    {"name": "Ai", "scale": 1e0, "bounds": (1e-4, None)},
+    {"name": "cv", "value": 5e2, "transform": "fixed"},
+    {"name": "sigw_w", "scale": 1e-3 * sT**0.5, "bounds": (1e-4, None)},
+    {"name": "sigw_i", "scale": 1e-3 * sT**0.5, "bounds": (1e-4, None)},
+    {"name": "sigv", "scale": 1e-2, "bounds": (1e-4, None)},
+    {"name": "x0_w", "loc": 15.0, "scale": 7.0, "transform": "none"},
+    {"name": "x0_i", "loc": 20.0, "scale": 7.0, "transform": "none"},
+    {"name": "sigx0_w", "value": 0.1, "transform": "fixed"},
+    {"name": "sigx0_i", "value": 0.1, "transform": "fixed"},
 ]
 
 par_rc3 = [
-    dict(name="Ro", scale=1e-2, bounds=(1e-4, None)),
-    dict(name="Ri", scale=1e-3, bounds=(1e-4, None)),
-    dict(name="Rm", scale=1e-3, bounds=(1e-4, None)),
-    dict(name="Cw", scale=1e7 / sT, bounds=(1e-4, None)),
-    dict(name="Ci", scale=1e6 / sT, bounds=(1e-4, None)),
-    dict(name="Cm", scale=1e7 / sT, bounds=(1e-4, None)),
-    dict(name="Aw", scale=1e0, bounds=(1e-4, None)),
-    dict(name="Ai", scale=1e0, bounds=(1e-4, None)),
-    dict(name="cv", value=5e2, transform="fixed"),
-    dict(name="sigw_w", scale=1e-3 * sT**0.5, bounds=(1e-4, None)),
-    dict(name="sigw_i", scale=1e-3 * sT**0.5, bounds=(1e-4, None)),
-    dict(name="sigw_m", scale=1e-3 * sT**0.5, bounds=(1e-4, None)),
-    dict(name="sigv", scale=1e-2, bounds=(1e-4, None)),
-    dict(name="x0_w", loc=15.0, scale=7.0, transform="none"),
-    dict(name="x0_i", loc=20.0, scale=7.0, transform="none"),
-    dict(name="x0_m", loc=20.0, scale=7.0, transform="none"),
-    dict(name="sigx0_w", value=0.1, transform="fixed"),
-    dict(name="sigx0_i", value=0.1, transform="fixed"),
-    dict(name="sigx0_m", value=0.1, transform="fixed"),
+    {"name": "Ro", "scale": 1e-2, "bounds": (1e-4, None)},
+    {"name": "Ri", "scale": 1e-3, "bounds": (1e-4, None)},
+    {"name": "Rm", "scale": 1e-3, "bounds": (1e-4, None)},
+    {"name": "Cw", "scale": 1e7 / sT, "bounds": (1e-4, None)},
+    {"name": "Ci", "scale": 1e6 / sT, "bounds": (1e-4, None)},
+    {"name": "Cm", "scale": 1e7 / sT, "bounds": (1e-4, None)},
+    {"name": "Aw", "scale": 1e0, "bounds": (1e-4, None)},
+    {"name": "Ai", "scale": 1e0, "bounds": (1e-4, None)},
+    {"name": "cv", "value": 5e2, "transform": "fixed"},
+    {"name": "sigw_w", "scale": 1e-3 * sT**0.5, "bounds": (1e-4, None)},
+    {"name": "sigw_i", "scale": 1e-3 * sT**0.5, "bounds": (1e-4, None)},
+    {"name": "sigw_m", "scale": 1e-3 * sT**0.5, "bounds": (1e-4, None)},
+    {"name": "sigv", "scale": 1e-2, "bounds": (1e-4, None)},
+    {"name": "x0_w", "loc": 15.0, "scale": 7.0, "transform": "none"},
+    {"name": "x0_i", "loc": 20.0, "scale": 7.0, "transform": "none"},
+    {"name": "x0_m", "loc": 20.0, "scale": 7.0, "transform": "none"},
+    {"name": "sigx0_w", "value": 0.1, "transform": "fixed"},
+    {"name": "sigx0_i", "value": 0.1, "transform": "fixed"},
+    {"name": "sigx0_m", "value": 0.1, "transform": "fixed"},
 ]
 
 par_p = [
-    dict(name="period", bounds=(1e-4, None)),
-    dict(name="mscale", bounds=(1e-4, None)),
-    dict(name="lscale", bounds=(0.05, None)),
-    dict(name="sigv", bounds=(1e-4, None)),
+    {"name": "period", "bounds": (1e-4, None)},
+    {"name": "mscale", "bounds": (1e-4, None)},
+    {"name": "lscale", "bounds": (0.05, None)},
+    {"name": "sigv", "bounds": (1e-4, None)},
 ]
 
 par_m = [
-    dict(name="mscale", bounds=(1e-4, None)),
-    dict(name="lscale", bounds=(1e-4, None)),
-    dict(name="sigv", bounds=(1e-4, None)),
+    {"name": "mscale", "bounds": (1e-4, None)},
+    {"name": "lscale", "bounds": (1e-4, None)},
+    {"name": "sigv", "bounds": (1e-4, None)},
 ]
 
 par_qp = [
-    dict(name="period", bounds=(1e-4, None)),
-    dict(name="mscale", bounds=(1e-4, None)),
-    dict(name="lscale", bounds=(0.05, None)),
-    dict(name="sigv", bounds=(1e-4, None)),
-    dict(name="decay", bounds=(1e-4, None)),
+    {"name": "period", "bounds": (1e-4, None)},
+    {"name": "mscale", "bounds": (1e-4, None)},
+    {"name": "lscale", "bounds": (0.05, None)},
+    {"name": "sigv", "bounds": (1e-4, None)},
+    {"name": "decay", "bounds": (1e-4, None)},
 ]
 
 model_list = [

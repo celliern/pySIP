@@ -31,6 +31,44 @@ You can find the documentation [here](https://locie.github.io/pySIP/) : it
 contains a quick start guide, a cookbook, a tour of the
 library internals and a reference documentation.
 
+## Requirements and installation
+
+Use Python 3.13 or 3.14.
+The current dependency baseline is NumPy 2.5, SciPy 1.18, pandas 3.1,
+Pydantic 2, PyMC 6, PyTensor 3, and ArviZ 1. Bayesian traces are
+`xarray.DataTree` objects.
+
+Install the locked development environment with Poetry 2.5.1:
+
+```sh
+poetry install --only main,tests,dev
+poetry run ruff check .
+poetry run pyright
+poetry run pytest
+```
+
+CI runs the test suite on both supported Python versions. Documentation uses
+Zensical: install with `poetry install --only main,docs`, preview with
+`poetry run zensical serve`, and build with `poetry run zensical build --strict`.
+The generated site is written to `site/`.
+
+## Numerical and maintenance corrections
+
+- Priors use standardized constrained values: `theta = loc + scale * value`.
+  Bayesian trace variables use `parameters.ids_free`; duplicate model names
+  receive distinct composition prefixes.
+- Predictive sampling generates noisy trajectories without conditioning on
+  supplied outputs. Both predictive methods accept `random_seed` and run serially.
+- Covariance factors are upper triangular: covariance is `factor.T @ factor`.
+  Simulation, filtering, missing-output likelihoods, feedthrough, and predictive
+  uncertainty follow this convention consistently.
+- Custom inverse/eigen/exponential implementations and unused private
+  discretization paths were removed in favor of NumPy/SciPy. Unused direct
+  dependencies and obsolete serialization hooks were removed.
+- `pytest.ini` is the single test configuration, including source and guide
+  doctests. Only one latent-force input is currently supported; unsupported
+  multiple-input configurations raise `ValueError`.
+
 ## IMPORTANT - Migration to v1.0.0
 
 The version 1.0.0 of pySIP is a major update of the library. It focused on
@@ -43,7 +81,7 @@ stable state.
 
 Main changes are:
 
-- using [pymc3] for the bayesian inference (all the mcmc module have been
+- using [PyMC] for the bayesian inference (all the mcmc module have been
   removed)
 - removing all analytical jacobian computation (using numerical approximation of
   the jacobian instead)
@@ -81,4 +119,4 @@ Chambéry, France,
 Thermique Innovant Adapté pour le Diagnostic
 
 
-[pymc3]: https://docs.pymc.io/
+[PyMC]: https://www.pymc.io/

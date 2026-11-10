@@ -1,13 +1,18 @@
-from dataclasses import dataclass
+"""Single indoor capacity with outdoor exchange, solar, HVAC, and scaled ventilation heat."""
 
+from dataclasses import dataclass
+from typing import cast
+
+from ...params import Parameters
 from ..base import RCModel
 
 
 @dataclass
 class Ti_RAcv(RCModel):
-    states = [("TEMPERATURE", "xi", "indoor temperature")]
+    """Single indoor capacity with outdoor exchange, solar, HVAC, and scaled ventilation heat."""
+    states = (("TEMPERATURE", "xi", "indoor temperature"),)
 
-    params = [
+    params = (
         ("THERMAL_RESISTANCE", "R", "between the outdoor and the indoor"),
         ("THERMAL_CAPACITY", "C", "effective overall capacity"),
         ("SOLAR_APERTURE", "A", "effective solar aperture"),
@@ -16,25 +21,24 @@ class Ti_RAcv(RCModel):
         ("MEASURE_DEVIATION", "sigv", "of the indoor temperature measurements"),
         ("INITIAL_MEAN", "x0", "of the infoor temperature"),
         ("INITIAL_DEVIATION", "sigx0", "of the infoor temperature"),
-    ]
+    )
 
-    inputs = [
+    inputs = (
         ("TEMPERATURE", "To", "outdoor temperature"),
         ("POWER", "Qgh", "solar irradiance"),
         ("POWER", "Qh", "HVAC system heat"),
         ("POWER", "Qv", "heat from the ventilation system"),
-    ]
+    )
 
-    outputs = [("TEMPERATURE", "xi", "indoor temperature")]
+    outputs = (("TEMPERATURE", "xi", "indoor temperature"),)
 
-    def __post_init__(self):
-        super().__post_init__()
-
-    def set_constant_continuous_ssm(self):
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices in place."""
         self.C[0, 0] = 1.0
 
-    def update_continuous_ssm(self):
-        R, C, A, cv, sigw, sigv, x0, sigx0, *_ = self.parameters.theta
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
+        R, C, A, cv, sigw, sigv, x0, sigx0, *_ = cast(Parameters, self.parameters).theta
 
         self.A[0, 0] = -1.0 / (C * R)
         self.B[0, :] = [1.0 / (C * R), A / C, 1.0 / C, cv / C]

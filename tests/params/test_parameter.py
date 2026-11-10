@@ -17,7 +17,7 @@ defaults = namedtuple("Defaults", "name value scale bounds prior theta")(
 
 
 def parameter_fixture(transform, **kwargs):
-    kwargs = {**{"transform": transform}, **defaults._asdict(), **kwargs}
+    kwargs = {"transform": transform, **defaults._asdict(), **kwargs}
     parameter = Parameter(**kwargs)
     def fixture() -> Parameter:
         return parameter
@@ -84,6 +84,35 @@ def test_init_upper(hp_upper: Parameter):
     assert hp_upper.scale == defaults.scale
     assert hp_upper.bounds == (None, 0.9)
     assert hp_upper.prior == defaults.prior
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"value": None, "prior": None}])
+def test_parameter_defaults(kwargs):
+    parameter = Parameter("default", **kwargs)
+
+    assert parameter.value == parameter.theta == parameter.eta == 0.0
+    assert parameter.transform.name == "none"
+    assert parameter.prior is None
+
+
+def test_parameter_transform_instance():
+    transform = Parameter("", bounds=(0.0, 1.0)).transform
+    parameter = Parameter("", value=0.5, transform=transform)
+
+    assert parameter.transform is transform
+    assert parameter.eta == 0.0
+
+
+@pytest.mark.parametrize("scale", [0.0, -1.0, None])
+def test_parameter_init_error_invalid_scale(scale):
+    with pytest.raises(ValidationError):
+        Parameter("", scale=scale)
+
+
+@pytest.mark.parametrize("bounds", [(1.0, 1.0), ("invalid", 2.0), (None,), None])
+def test_parameter_init_error_invalid_bounds(bounds):
+    with pytest.raises(ValidationError):
+        Parameter("", bounds=bounds)
 
 
 def test_parameter_init_error_name_is_not_a_string():
@@ -177,9 +206,51 @@ def test_parameter_upper_transform(hp_upper: Parameter):
     assert hp_upper.get_grad_penalty() == pytest.approx(9.999999)
 
 
-def test_infer_transform_from_bounds():
-    assert Parameter("", bounds=(None, None)).transform.name == "none"
-    assert Parameter("", bounds=(0.0, None)).transform.name == "log"
-    assert Parameter("", bounds=(5.0, None)).transform.name == "lower"
-    assert Parameter("", bounds=(None, 5.0)).transform.name == "upper"
-    assert Parameter("", bounds=(0.0, 5.0)).transform.name == "logit"
+@pytest.mark.parametrize(
+    "bounds, transform, value",
+    [
+        ((None, None), "none", 0.0),
+        ((0.0, None), "log", 1.0),
+        ((5.0, None), "lower", 6.0),
+        ((None, 5.0), "upper", 4.0),
+        ((0.0, 5.0), "logit", 2.5),
+    ],
+)
+def test_infer_transform_from_bounds(bounds, transform, value):
+    parameter = Parameter("", bounds=bounds)
+
+    assert parameter.transform.name == transform
+    assert parameter.value == parameter.theta == value
+    assert parameter.eta == 0.0
+
+
+@pytest.mark.parametrize("transform", ["none", "fixed", "log", "lower", "upper", "logit"])
+def test_standardized_assignment_synchronizes_transform(transform):
+    parameter = Parameter(
+        "scaled", value=0.4, loc=10.0, scale=3.0,
+        bounds=(0.0, 1.0), transform=transform,
+    )
+    parameter.theta_sd = 0.7
+    assert parameter.theta == pytest.approx(12.1)
+    assert parameter.eta == pytest.approx(parameter.transform.transform(0.7))
+    assert parameter.get_inv_transformed() == pytest.approx(0.7)
+    parameter.eta = parameter.eta
+    assert parameter.theta_sd == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize(
+    "bounds, transform, value",
+    [
+        ((-5.0, None), "lower", -4.0),
+        ((None, 0.0), "upper", -1.0),
+        ((None, -5.0), "upper", -6.0),
+    ],
+)
+def test_one_sided_bounds_allow_nonpositive_endpoints(bounds, transform, value):
+    parameter = Parameter("bounded", bounds=bounds, loc=10.0, scale=2.0)
+    assert parameter.transform.name == transform
+    assert parameter.theta_sd == pytest.approx(value)
+    assert parameter.theta == pytest.approx(10.0 + 2.0 * value)
+    parameter.eta = 0.5
+    assert parameter.transform.in_bounds(parameter.theta_sd)
+    assert parameter.transform.transform(parameter.theta_sd) == pytest.approx(0.5)

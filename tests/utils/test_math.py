@@ -56,3 +56,20 @@ def test_diff_upper_cholesky(N):
     assert np.allclose(upper_chol.T @ upper_chol, S)
     assert np.allclose(R.T @ R, S)
     assert np.allclose(dR, dR_fd)
+
+
+def test_diff_upper_cholesky_singular() -> None:
+    """Singular factors use least squares for both derivative solves."""
+    R = np.diag([0.0, 2.0])
+    dS = np.diag([0.0, 8.0])
+
+    dR = diff_upper_cholesky(R, dS)
+
+    np.testing.assert_allclose(dR, np.diag([0.0, 2.0]))
+    np.testing.assert_allclose(dR.T @ R + R.T @ dR, dS)
+
+
+def test_diff_upper_cholesky_invalid_input() -> None:
+    """Invalid solves retain their original error instead of using an unset RHS."""
+    with pytest.raises(ValueError, match="infs or NaNs"):
+        diff_upper_cholesky(np.diag([np.nan, 2.0]), np.eye(2))

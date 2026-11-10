@@ -1,7 +1,11 @@
+"""Block state-space realization of independent temporal kernel sums."""
+
 from copy import deepcopy
 from dataclasses import dataclass
+from typing import cast
 
-from ..base import GPModel, Par
+from ...params import Parameters
+from ..base import GPModel, Node, Par
 
 
 @dataclass
@@ -21,7 +25,8 @@ class GPSum(GPModel):
     because it is already defined in `gp1`.
     """
 
-    def __init__(self, gp1: GPModel, gp2: GPModel):
+    def __init__(self, gp1: GPModel, gp2: GPModel) -> None:
+        """Compose deep copies without mutating the supplied models."""
         if not isinstance(gp1, GPModel):
             raise TypeError("`gp1` must be an GPModel instance")
 
@@ -30,28 +35,29 @@ class GPSum(GPModel):
 
         self._gp1 = deepcopy(gp1)
         self._gp2 = deepcopy(gp2)
+        # Both copies have completed StateSpace.__post_init__.
+        parameters1 = cast(Parameters, self._gp1.parameters)
+        parameters2 = cast(Parameters, self._gp2.parameters)
 
-        for node in self._gp2.params:
+        for node in cast(list[Node], self._gp2.params):
             if node.category == Par.MEASURE_DEVIATION:
-                self._gp2.parameters.set_parameter(
+                parameters2.set_parameter(
                     node.name, value=0.0, transform="fixed"
                 )
                 break
 
-        self.parameters = self._gp1.parameters + self._gp2.parameters
+        self.parameters = parameters1 + parameters2
 
-        _states = self._gp1.states + self._gp2.states
-        self.states = []
-        for s in _states:
-            self.states.append(s.unpack())
+        _states = cast(list[Node], self._gp1.states) + cast(list[Node], self._gp2.states)
+        self.states = [s.unpack() for s in _states]
 
-        self.params = []
-        for node in self._gp1.params:
-            node.name = self._gp1.name + "__" + node.name
-            self.params.append(node.unpack())
-        for node in self._gp2.params:
-            node.name = self._gp2.name + "__" + node.name
-            self.params.append(node.unpack())
+        self.params = [
+            (node.category.name, name, node.description)
+            for node, name in zip(
+                [*cast(list[Node], self._gp1.params), *cast(list[Node], self._gp2.params)],
+                self.parameters.ids,
+            )
+        ]
 
         self.inputs = []
 
@@ -61,11 +67,13 @@ class GPSum(GPModel):
 
         super().__post_init__()
 
-    def set_constant_continuous_ssm(self):
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices in place."""
         self._gp1.set_constant_continuous_ssm()
         self._gp2.set_constant_continuous_ssm()
 
-    def update_continuous_ssm(self):
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
         self._gp1.update_continuous_ssm()
         self._gp2.update_continuous_ssm()
 

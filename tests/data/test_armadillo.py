@@ -22,22 +22,22 @@ def data_armadillo():
 def parameters_armadillo():
     sT = 3600.0 * 24.0
     return [
-        dict(name="Ro", scale=1e-2, bounds=(0, None), prior=LogNormal(1, 1)),
-        dict(name="Ri", scale=1e-3, bounds=(0, None), prior=LogNormal(1, 1)),
-        dict(name="Cw", scale=1e7 / sT, bounds=(0, None), prior=LogNormal(1, 1)),
-        dict(name="Ci", scale=1e6 / sT, bounds=(0, None), prior=LogNormal(1, 1)),
-        dict(
-            name="sigw_w",
-            scale=1e-2 * sT**0.5,
-            bounds=(0, None),
-            prior=LogNormal(1, 1),
-        ),
-        dict(name="sigw_i", value=0, transform="fixed"),
-        dict(name="sigv", scale=1e-2, bounds=(0, None), prior=LogNormal(1, 1)),
-        dict(name="x0_w", loc=25, scale=5, prior=Normal(0, 1)),
-        dict(name="x0_i", value=26.701, transform="fixed"),
-        dict(name="sigx0_w", value=1, transform="fixed"),
-        dict(name="sigx0_i", value=0.1, transform="fixed"),
+        {"name": "Ro", "scale": 1e-2, "bounds": (0, None), "prior": LogNormal(1, 1)},
+        {"name": "Ri", "scale": 1e-3, "bounds": (0, None), "prior": LogNormal(1, 1)},
+        {"name": "Cw", "scale": 1e7 / sT, "bounds": (0, None), "prior": LogNormal(1, 1)},
+        {"name": "Ci", "scale": 1e6 / sT, "bounds": (0, None), "prior": LogNormal(1, 1)},
+        {
+            "name": "sigw_w",
+            "scale": 1e-2 * sT**0.5,
+            "bounds": (0, None),
+            "prior": LogNormal(1, 1),
+        },
+        {"name": "sigw_i", "value": 0, "transform": "fixed"},
+        {"name": "sigv", "scale": 1e-2, "bounds": (0, None), "prior": LogNormal(1, 1)},
+        {"name": "x0_w", "loc": 25, "scale": 5, "prior": Normal(0, 1)},
+        {"name": "x0_i", "value": 26.701, "transform": "fixed"},
+        {"name": "sigx0_w", "value": 1, "transform": "fixed"},
+        {"name": "sigx0_i", "value": 0.1, "transform": "fixed"},
     ]
 
 
@@ -54,7 +54,7 @@ def regressor_armadillo(statespace_armadillo: Regressor):
 
 
 def test_fit_predict(data_armadillo, regressor_armadillo):
-    summary, corr, scipy_summary = regressor_armadillo.fit(
+    _summary, _corr, scipy_summary = regressor_armadillo.fit(
         df=data_armadillo,
     )
 

@@ -1,4 +1,9 @@
-class Namespace(dict):
+"""Dictionary-backed namespaces with attribute access and pickle support."""
+
+from typing import Any
+
+
+class Namespace(dict[str, Any]):
     """A namespace object that allows attributes to be accessed as dict keys.
 
     This class is a subclass of dict, so it can be used as a dict.  It
@@ -14,92 +19,35 @@ class Namespace(dict):
 
     """
 
-    def __init__(self, *args, **kwargs):
-        super(Namespace, self).__init__(*args, **kwargs)
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize from dict-compatible arguments and share attribute storage."""
+        super().__init__(*args, **kwargs)
         self.__dict__ = self
 
-    def __repr__(self):
-        return "Namespace(%s)" % super(Namespace, self).__repr__()
+    def __repr__(self) -> str:
+        """Return the dictionary representation wrapped in the class name."""
+        return f"Namespace({super().__repr__()})"
 
-    def __str__(self):
-        return "Namespace(%s)" % super(Namespace, self).__str__()
-
-    def __getstate__(self):
+    def __getstate__(self) -> dict[str, Any]:
+        """Return the live dictionary of dynamic values as the pickle payload."""
         return self.__dict__
 
-    def __setstate__(self, state):
-        self.__dict__ = state
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Merge a pickle payload and restore shared attribute storage."""
+        self.update(state)
+        self.__dict__ = self
 
-    def __delattr__(self, name):
+    def __delattr__(self, name: str) -> None:
+        """Delete a stored attribute, raising AttributeError if it is absent."""
         if name in self:
             del self[name]
         else:
             raise AttributeError(name)
 
-    def __dir__(self):
+    def __dir__(self) -> list[str]:
+        """Return stored keys rather than inherited dictionary attributes."""
         return list(self.keys())
 
-    def copy(self):
+    def copy(self) -> "Namespace":
+        """Return a shallow namespace copy; stored values remain shared."""
         return Namespace(self)
-
-    def update(self, *args, **kwargs):
-        if len(args) > 1:
-            raise TypeError("update expected at most 1 arguments, got %d" % len(args))
-        other = dict(*args, **kwargs)
-        for key, value in other.items():
-            self[key] = value
-
-    def setdefault(self, key, default=None):
-        if key not in self:
-            self[key] = default
-        return self[key]
-
-    def pop(self, key, *args):
-        if len(args) > 1:
-            raise TypeError(
-                "pop expected at most 2 arguments, got %d" % (len(args) + 1)
-            )
-        if key in self:
-            value = self[key]
-            del self[key]
-            return value
-        elif args:
-            return args[0]
-        else:
-            raise KeyError(key)
-
-    def popitem(self):
-        try:
-            key = next(iter(self))
-        except StopIteration:
-            raise KeyError("popitem(): dictionary is empty")
-        value = self[key]
-        del self[key]
-        return key, value
-
-    def clear(self):
-        for key in list(self.keys()):
-            del self[key]
-
-    def __reduce__(self):
-        items = [[k, self[k]] for k in self]
-        inst_dict = vars(self).copy()
-        inst_dict.pop("__dict__", None)
-        inst_dict.pop("__weakref__", None)
-        return (self.__class__, (items,), inst_dict)
-
-    def __copy__(self):
-        return self.__class__(self)
-
-    def __deepcopy__(self, memo):
-        import copy
-
-        return self.__class__(copy.deepcopy(dict(self), memo))
-
-    def __eq__(self, other):
-        if isinstance(other, Namespace):
-            return dict(self) == dict(other)
-        return dict(self) == other
-
-    def __ne__(self, other):
-        return not self == other

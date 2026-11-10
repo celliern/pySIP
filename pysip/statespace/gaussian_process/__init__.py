@@ -1,3 +1,5 @@
+"""Temporal Gaussian-process state-space kernels and their compositions."""
+
 from .gp_product import GPProduct
 from .gp_sum import GPSum
 from .matern import Matern12, Matern32, Matern52

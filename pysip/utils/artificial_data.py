@@ -1,27 +1,23 @@
+"""Synthetic excitation signals and regularly or randomly sampled sine waves."""
+
 import itertools
 
 import numpy as np
+from numpy.typing import NDArray
 from pylfsr import LFSR
 
 
-def prbs(Tmax, Tmin, initstate="random"):
-    """Pseudo Random Binary signal (PRBS)
+def prbs(Tmax: int, Tmin: int, initstate: str = "random") -> np.ndarray:
+    """Return a one-dimensional pseudo-random binary excitation sequence.
 
-    Args:
-        Tmax: maximum number of samples in one state
-        Tmin: minimum number of samples in one state
-        initstate: initial state of the linear feedback state register
-            'ones': binary numpy array of ones, dimension = (length register,)
-            'random': random binary numpy array, dimension = (length register,)
-
-    Returns:
-        PRBS as a numpy array
-
-    Notes:
-        The Linear Feedback Shift Register (LFSR) can be installed
-        from PyPi: https://pypi.org/project/pylfsr/
-        or from the source:
-        https://github.com/Nikeshbajaj/Linear_Feedback_Shift_Register
+    Each register bit is repeated ``Tmin`` times. With register length
+    ``r = ceil(Tmax/Tmin)``, the result has ``(2**r - 1) * Tmin`` entries.
+    ``initstate`` is ``'random'`` or ``'ones'``. Noninteger durations raise
+    TypeError; Tmax < 2, Tmin < 1, Tmin >= Tmax, invalid initial states or
+    register lengths outside [2, 31] raise ValueError. Assertions check
+    that maximum and minimum generated runs equal Tmax and Tmin, so otherwise
+    admissible durations or random initial states may still raise AssertionError.
+    The external LFSR implementation determines the binary array's dtype.
     """
     if not isinstance(Tmax, int):
         raise TypeError("`Tmax` must be an integer")
@@ -100,72 +96,63 @@ def prbs(Tmax, Tmin, initstate="random"):
     return seq_padded
 
 
-def generate_time(n=50, bounds=(0, 50), random=False):
-    """Generates time array
+def generate_time(
+    n: int = 50, bounds: tuple[float, float] = (0, 50), random: bool = False
+) -> NDArray[np.float64]:
+    """Return a sorted shape-(n,) float time array between increasing bounds.
 
-    Args:
-        n (int): Number of time instants to generate
-        bounds (tuple): t ∈ [bounds[0], bounds[1]]
-        random (bool):
-            True: random
-            False: linear time spacing
-        period (float): Sinusoidal period
-        amplitude (float): Sinuoidal amplitude
-        noise_std (float): Gaussian noise standard deviation
-
-    Returns:
-        t (np.array): Time data
+    Linear spacing includes both endpoints; random spacing uses sorted uniform
+    draws from the half-open interval [lower, upper). Wrong argument types
+    or nonincreasing bounds raise ValueError. Negative n is rejected by NumPy.
+    A tuple with fewer than two bounds raises IndexError.
     """
     if not isinstance(n, int):
-        raise ValueError("`n` must be an integer")
+        raise ValueError("`n` must be an integer")  # noqa: TRY004 - Documented ValueError contract.
 
     if not isinstance(bounds, tuple):
-        raise ValueError("`bounds` must be a tuple")
+        raise ValueError("`bounds` must be a tuple")  # noqa: TRY004 - Documented ValueError contract.
 
-    bounds = np.asarray(bounds)
-    if bounds[1] <= bounds[0]:
+    bounds_array = np.asarray(bounds)
+    if bounds_array[1] <= bounds_array[0]:
         raise ValueError("upper bound > lower bound")
 
     if not isinstance(random, bool):
-        raise ValueError("`random` must be a boolean")
+        raise ValueError("`random` must be a boolean")  # noqa: TRY004 - Documented ValueError contract.
 
     if random:
-        t = np.sort(bounds[0] + (bounds[1] - bounds[0]) * np.random.rand(n))
+        t = np.sort(
+            bounds_array[0]
+            + (bounds_array[1] - bounds_array[0]) * np.random.rand(n)
+        )
     else:
-        t = np.linspace(bounds[0], bounds[1], num=n)
+        t = np.linspace(bounds_array[0], bounds_array[1], num=n)
 
     return t
 
 
 def generate_sine(
-    n=50,
-    bounds=(0, 50),
-    random=False,
-    period=24.0,
-    phase=0.0,
-    amplitude=10.0,
-    offset=0.0,
-    noise_std=1.0,
-    clip_to_0=False,
-):
-    """Generate sinusoidal data
+    n: int = 50,
+    bounds: tuple[float, float] = (0, 50),
+    random: bool = False,
+    period: float = 24.0,
+    phase: float = 0.0,
+    amplitude: float = 10.0,
+    offset: float = 0.0,
+    noise_std: float = 1.0,
+    clip_to_0: bool = False,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return ``(time, values)`` arrays of shape (n,) for a noisy sine wave.
 
-    Args:
-        n (int): Number of time instants to generate
-        bounds (tuple): t ∈ [bounds[0], bounds[1]]
-        random (bool):
-            True: random
-            False: linear time spacing
-        period (float): Sinusoidal period > 0
-        phase (float): Phase shift [0, 2 * np.pi]
-        amplitude (float): Sinuoidal amplitude > 0
-        offset (float): Sinusoidal mean offset
-        noise_std (float): Gaussian noise standard deviation > 0
-        clip_to_0 (bool): Set negative values to 0
+    Time sampling follows `generate_time`. Values equal
+    ``offset + amplitude*sin(2*pi*time/period + phase)`` plus independent
+    Gaussian noise with standard deviation ``noise_std``. ``phase`` is in
+    radians with no upper bound. ``clip_to_0`` clips negative generated values
+    in place before returning them; no caller input is modified.
 
-    Returns:
-        t (np.array): Time data
-        y (np.array): Sinusoidal data
+    ``period`` and ``amplitude`` must be positive floats; ``phase`` and
+    ``noise_std`` must be nonnegative floats; ``offset`` must be a float.
+    Violations raise ValueError. Time-argument validation is delegated to
+    `generate_time`.
     """
     if not isinstance(period, float) or period <= 0.0:
         raise ValueError("`period` must be a positive float")
@@ -180,7 +167,7 @@ def generate_sine(
         raise ValueError("`phase` must be a positive float")
 
     if not isinstance(offset, float):
-        raise ValueError("`offset` must be a float")
+        raise ValueError("`offset` must be a float")  # noqa: TRY004 - Documented ValueError contract.
 
     t = generate_time(n, bounds, random)
     y = (
@@ -195,26 +182,29 @@ def generate_sine(
     return t, y
 
 
-def generate_random_binary(n: int = 50, bounds: tuple = (0, 1e3)):
-    """Generate random binary signal
+def generate_random_binary(
+    n: int = 50, bounds: tuple[float, float] = (0, 1e3)
+) -> np.ndarray:
+    """Return shape-(max(n, 0),) independent draws from the two bounds.
 
-    Args:
-        n: Number of time instants to generate
-        bounds: Binary signal ∈ [bounds[0], bounds[1]]
-
-    Returns:
-       Random binary signal
+    Each endpoint is selected with equal probability. The output dtype follows
+    the bounds' numeric dtype, except empty output is floating point. Noninteger
+    n, nontuple bounds or nonincreasing bounds raise ValueError. A tuple with
+    fewer than two entries raises IndexError; negative n returns an empty array.
     """
     if not isinstance(n, int):
-        raise ValueError("`n` must be an integer")
+        raise ValueError("`n` must be an integer")  # noqa: TRY004 - Documented ValueError contract.
 
     if not isinstance(bounds, tuple):
-        raise ValueError("`bounds` must be a tuple")
+        raise ValueError("`bounds` must be a tuple")  # noqa: TRY004 - Documented ValueError contract.
 
-    bounds = np.asarray(bounds)
-    if bounds[1] <= bounds[0]:
+    bounds_array = np.asarray(bounds)
+    if bounds_array[1] <= bounds_array[0]:
         raise ValueError("upper bound > lower bound")
 
     return np.asarray(
-        [bounds[1] if np.random.randn() > 0 else bounds[0] for _ in range(n)]
+        [
+            bounds_array[1] if np.random.randn() > 0 else bounds_array[0]
+            for _ in range(n)
+        ]
     )

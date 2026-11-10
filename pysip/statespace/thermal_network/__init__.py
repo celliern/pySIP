@@ -1,3 +1,5 @@
+"""Resistance-capacitance thermal network models with indoor observations."""
+
 from .r2c2_qgh import R2C2Qgh
 from .ti_ra import Ti_RA
 from .ti_racv import Ti_RAcv
@@ -24,15 +26,10 @@ from .twtitm_rorirmrbawaicv import TwTiTm_RoRiRmRbAwAicv
 
 __all__ = [
     "R2C2Qgh",
-    "Ti_RA",
-    "Ti_RAcv",
     "TiTh_RwRhAi",
     "TiTm_RwRmAi",
-    "TwTi_RoRi",
-    "TwTi_RoRiAwAi",
-    "TwTi_RoRiAwAicv",
-    "TwTi_RoRiRbAwAi",
-    "TwTi_RoRiRbAwAicv",
+    "Ti_RA",
+    "Ti_RAcv",
     "TwTiTb_RoRiRbAwAicv",
     "TwTiTb_RoRiRibRbbAwAicv",
     "TwTiTh_RoRiRhAwAi",
@@ -46,4 +43,9 @@ __all__ = [
     "TwTiTm_RoRiRmAwAicv",
     "TwTiTm_RoRiRmRbAwAi",
     "TwTiTm_RoRiRmRbAwAicv",
+    "TwTi_RoRi",
+    "TwTi_RoRiAwAi",
+    "TwTi_RoRiAwAicv",
+    "TwTi_RoRiRbAwAi",
+    "TwTi_RoRiRbAwAicv",
 ]

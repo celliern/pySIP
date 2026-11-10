@@ -9,24 +9,20 @@ jobs:
   build-doc:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11.2"
-      - name: Install pandoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pandoc
+          python-version: "3.14"
       - name: Install poetry
-        uses: abatilo/actions-poetry@v2
-      - name: Install dependancies
-        run: poetry install --with docs
+        run: pip install poetry==2.5.1
+      - name: Install dependencies
+        run: poetry install --only main,docs
       - name: Build doc
-        run: poetry run make -C docs html
+        run: poetry run zensical build --strict
       - name: Upload page artefact
-        uses: actions/upload-pages-artifact@v1.0.5
+        uses: actions/upload-pages-artifact@v4
         with:
-          path: docs/_build/html/
+          path: site/
 
 
   deploy-doc:  # deploy the artifact build on build-doc
@@ -41,4 +37,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v1
+        uses: actions/deploy-pages@v4

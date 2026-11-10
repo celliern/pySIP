@@ -1,18 +1,22 @@
-from dataclasses import dataclass
+"""Envelope/indoor RC chain with solar gains and indoor-to-boundary resistance Rb."""
 
+from dataclasses import dataclass
+from typing import cast
+
+from ...params import Parameters
 from ..base import RCModel
 
 
 @dataclass
 class TwTi_RoRiRbAwAi(RCModel):
-    """Second order RC model"""
+    """Envelope/indoor RC chain with solar gains and indoor-to-boundary resistance Rb."""
 
-    states = [
+    states = (
         ("TEMPERATURE", "xw", "envelope temperature"),
         ("TEMPERATURE", "xi", "indoor temperature"),
-    ]
+    )
 
-    params = [
+    params = (
         ("THERMAL_RESISTANCE", "Ro", "between the outdoor and the envelope"),
         ("THERMAL_RESISTANCE", "Ri", "between the envelope and the indoor"),
         ("THERMAL_RESISTANCE", "Rb", "between the indoor and the boundary space"),
@@ -27,24 +31,23 @@ class TwTi_RoRiRbAwAi(RCModel):
         ("INITIAL_MEAN", "x0_i", "of the infoor temperature"),
         ("INITIAL_DEVIATION", "sigx0_w", "of the envelope temperature"),
         ("INITIAL_DEVIATION", "sigx0_i", "of the infoor temperature"),
-    ]
+    )
 
-    inputs = [
+    inputs = (
         ("TEMPERATURE", "To", "outdoor temperature"),
         ("TEMPERATURE", "Tb", "boundary temperature"),
         ("POWER", "Qgh", "solar irradiance"),
         ("POWER", "Qh", "HVAC system heat"),
-    ]
+    )
 
-    outputs = [("TEMPERATURE", "xi", "indoor temperature")]
+    outputs = (("TEMPERATURE", "xi", "indoor temperature"),)
 
-    def __post_init__(self):
-        super().__post_init__()
-
-    def set_constant_continuous_ssm(self):
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices in place."""
         self.C[0, 1] = 1.0
 
-    def update_continuous_ssm(self):
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
         (
             Ro,
             Ri,
@@ -61,7 +64,7 @@ class TwTi_RoRiRbAwAi(RCModel):
             sigx0_w,
             sigx0_i,
             *_,
-        ) = self.parameters.theta
+        ) = cast(Parameters, self.parameters).theta
 
         self.A[:] = [
             [-(Ro + Ri) / (Cw * Ri * Ro), 1.0 / (Cw * Ri)],

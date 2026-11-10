@@ -1,0 +1,64 @@
+[project]
+site_name = "pySIP"
+site_description = "Continuous-time stochastic state-space inference and prediction in Python"
+site_url = "https://locie.github.io/pySIP/"
+repo_url = "https://github.com/locie/pySIP"
+docs_dir = "docs"
+site_dir = "site"
+strict = true
+exclude_docs = """
+__pycache__/
+*.pyc
+"""
+extra_javascript = [
+  "javascripts/mathjax.js",
+  "https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js",
+]
+nav = [
+  { "Home" = "index.md" },
+  { "User guide" = [
+    { "Quickstart" = "content/quickstart.md" },
+    { "Advanced usage" = "content/advanced.md" },
+  ] },
+  { "Cookbook" = [
+    { "Overview" = "cookbook.md" },
+    { "Mauna Loa CO₂" = "examples/gaussian_process/Mauna_Loa_CO2.md" },
+    { "Matérn regression" = "examples/gaussian_process/regression_matern.md" },
+    { "Periodic regression" = "examples/gaussian_process/regression_periodic.md" },
+    { "Bayesian thermal model" = "examples/thermal_network/armadillo/fit_bayesian.md" },
+    { "Frequentist thermal model" = "examples/thermal_network/armadillo/fit_frequentist.md" },
+  ] },
+  { "Reference" = [
+    { "API" = "api.md" },
+    { "Implemented models" = "model_list.md" },
+  ] },
+  { "Contributing" = "content/contribute.md" },
+  { "Code of conduct" = "code_of_conduct.md" },
+]
+
+[project.theme]
+features = ["navigation.sections", "navigation.footer", "content.code.copy"]
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+footnotes = {}
+"pymdownx.arithmatex" = { generic = true }
+"pymdownx.highlight" = {}
+"pymdownx.superfences" = {}
+
+[project.plugins.mkdocstrings.handlers.python]
+paths = ["."]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+docstring_style = "numpy"
+show_source = false
+extensions = ["docs_api.py:RuntimeConstructors"]
+merge_init_into_class = true
+show_signature_annotations = true
+show_root_heading = true
+heading_level = 3
+
+[project.plugins.macros]
+module_name = "docs_macros"
+on_error_fail = true

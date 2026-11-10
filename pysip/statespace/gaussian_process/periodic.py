@@ -1,8 +1,12 @@
+"""Finite harmonic approximation of the periodic covariance kernel."""
+
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 from scipy.special import iv
 
+from ...params import Parameters
 from ..base import GPModel
 
 
@@ -15,8 +19,8 @@ class Periodic(GPModel):
 
     Parameters
     ----------
-    J: int
-        Degree of approximation (default=7)
+    J : int, default 7
+        Degree of approximation.
 
     References
     ----------
@@ -30,31 +34,33 @@ class Periodic(GPModel):
     J: int = field(default=7)
 
     # The state-space is composed of J+1 states_block
-    states_block = [
+    states_block = (
         ("ANY", "f(t)", "stochastic process"),
         ("ANY", "df(t)/dt", "derivative stochastic process"),
-    ]
+    )
 
-    params = [
+    params = (
         ("PERIOD", "period", "period of the function"),
         ("MAGNITUDE_SCALE", "mscale", "control the overall variance of the function"),
         ("LENGTH_SCALE", "lscale", "control the smoothness of the function"),
         ("MEASURE_DEVIATION", "sigv", "measurement standard deviation"),
-    ]
+    )
 
-    inputs = []
+    inputs = ()
 
-    outputs = [("ANY", "sum(f(t))", "sum of stochastic processes")]
+    outputs = (("ANY", "sum(f(t))", "sum of stochastic processes"),)
 
-    def set_constant_continuous_ssm(self):
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices in place."""
         self.C[0, ::2] = 1.0
         self._kron = np.kron(
             np.diag(range(self.J + 1)),
             np.array([[0.0, -2.0 * np.pi], [2.0 * np.pi, 0.0]]),
         )
 
-    def update_continuous_ssm(self):
-        period, mscale, lscale, sigv, *_ = self.parameters.theta
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
+        period, mscale, lscale, sigv, *_ = cast(Parameters, self.parameters).theta
 
         q2 = (
             2.0

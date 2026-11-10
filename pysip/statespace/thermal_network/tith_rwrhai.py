@@ -1,18 +1,22 @@
-from dataclasses import dataclass
+"""Indoor/heater capacities linked by Rh, with outdoor exchange through Rw and indoor solar gains."""
 
+from dataclasses import dataclass
+from typing import cast
+
+from ...params import Parameters
 from ..base import RCModel
 
 
 @dataclass
 class TiTh_RwRhAi(RCModel):
-    """Second order RC model"""
+    """Indoor/heater capacities linked by Rh, with outdoor exchange through Rw and indoor solar gains."""
 
-    states = [
+    states = (
         ("TEMPERATURE", "xi", "indoor temperature"),
         ("TEMPERATURE", "xh", "heater temperature"),
-    ]
+    )
 
-    params = [
+    params = (
         ("THERMAL_RESISTANCE", "Rw", "between the outdoor and the indoor"),
         ("THERMAL_RESISTANCE", "Rh", "between the indoor and the heater"),
         ("THERMAL_CAPACITY", "Ci", "of the indoor"),
@@ -25,23 +29,22 @@ class TiTh_RwRhAi(RCModel):
         ("INITIAL_MEAN", "x0_h", "of the heater temperature"),
         ("INITIAL_DEVIATION", "sigx0_i", "of the infoor temperature"),
         ("INITIAL_DEVIATION", "sigx0_h", "of the heater temperature"),
-    ]
+    )
 
-    inputs = [
+    inputs = (
         ("TEMPERATURE", "To", "outdoor temperature"),
         ("POWER", "Qgh", "solar irradiance"),
         ("POWER", "Qh", "HVAC system heat"),
-    ]
+    )
 
-    outputs = [("TEMPERATURE", "xi", "indoor temperature")]
+    outputs = (("TEMPERATURE", "xi", "indoor temperature"),)
 
-    def __post_init__(self):
-        super().__post_init__()
-
-    def set_constant_continuous_ssm(self):
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices in place."""
         self.C[0, 0] = 1.0
 
-    def update_continuous_ssm(self):
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
         (
             Rw,
             Rh,
@@ -56,7 +59,7 @@ class TiTh_RwRhAi(RCModel):
             sigx0_i,
             sigx0_h,
             *_,
-        ) = self.parameters.theta
+        ) = cast(Parameters, self.parameters).theta
 
         self.A[:] = [
             [-(Rh + Rw) / (Ci * Rh * Rw), 1.0 / (Ci * Rh)],

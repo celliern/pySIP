@@ -1,21 +1,28 @@
+"""Continuous state-space models, metadata registry, and data preparation."""
+
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import field
 from enum import Enum
 from itertools import chain
-from typing import Literal, NamedTuple, Optional, Sequence, Tuple, Union
-from typing_extensions import Self
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    NamedTuple,
+    cast,
+)
 
 import numpy as np
 import pandas as pd
-from pydantic import ConfigDict, conint
-from pydantic.dataclasses import dataclass
 from jinja2 import Template
+from pydantic import ConfigDict, Field, field_validator
+from pydantic.dataclasses import dataclass
 
 from ..params import Parameters
 from ..utils.math import nearest_cholesky
 from ..utils.misc import Namespace
 from . import discretization
-
 
 model_registry = Namespace()
 
@@ -59,23 +66,34 @@ class Node:
         Description of the node
     """
 
-    category: Union[Io, Par] = field()
+    category: Io | Par = field()
     name: str = field(default="")
     description: str = field(default="")
 
-    def __post_init__(self):
-        if isinstance(self.category, str):
+    @field_validator("category", mode="before")
+    @classmethod
+    def _validate_category(cls, category: Io | Par | str) -> Io | Par:
+        """Resolve category names to enums; reject unknown names."""
+        if isinstance(category, str):
             try:
-                self.category = Io[self.category]
+                return Io[category]
             except KeyError:
-                self.category = Par[self.category]
+                try:
+                    return Par[category]
+                except KeyError as exc:
+                    raise ValueError(f"Unknown node category: {category}") from exc
+        return category
 
-    def unpack(self):
-        """Unpack the Node"""
+    def unpack(self) -> tuple[str, str, str]:
+        """Return category name, variable name, and description."""
         return self.category.name, self.name, self.description
 
 
-def statespace(cls, *args, **kwargs):
+def statespace(cls: str, *args: Any, **kwargs: Any) -> "type[StateSpace] | StateSpace | None":
+    """Look up a registered name, instantiating it only if arguments are supplied.
+
+    Unknown names return None. Constructor arguments are forwarded unchanged.
+    """
     if cls not in model_registry:
         return None
     if args or kwargs:
@@ -91,35 +109,44 @@ class MetaStateSpace(type):
     the class to the registry.
     """
 
-    def __new__(cls, name, bases, attrs):
+    def __new__(
+        cls, name: str, bases: tuple[type, ...], attrs: dict[str, Any]
+    ) -> "MetaStateSpace":
+        """Create a model class and register its declared or qualified name."""
         # Add the class to the registry
-        new_class = super(MetaStateSpace, cls).__new__(cls, name, bases, attrs)
+        new_class = super().__new__(cls, name, bases, attrs)
         if "__base__" not in attrs:
             model_registry[attrs.get("__name__") or attrs["__qualname__"]] = new_class
         return new_class
 
-    def _format_section(self, section_name):
-        if not (nodes := getattr(self, section_name, False)):
+    def _format_section(self, section_name: str) -> str | None:
+        """Render a metadata section when nodes are present."""
+        if not (nodes := getattr(self, section_name, None)):
             return None
         nodes = [Node(*x) for x in nodes]
-        return self._section_template.render(section_name=section_name, nodes=nodes)
+        return cast(Template, cast(Any, self)._section_template).render(
+            section_name=section_name, nodes=nodes
+        )
 
     @property
-    def _sections(self) -> dict:
+    def _sections(self) -> dict[str, list[Node]]:
+        """Return normalized input, output, and state metadata."""
         return {
             section: [Node(*x) for x in getattr(self, section, [])]
             for section in ["inputs", "outputs", "states"]
         }
 
     @property
-    def _parameters_cat(self) -> dict:
+    def _parameters_cat(self) -> dict[Io | Par, list[Node]]:
+        """Group parameter metadata by physical category."""
         parameters_cat = defaultdict(list)
         for par in getattr(self, "params", []):
             par = Node(*par)
             parameters_cat[par.category].append(par)
         return dict(parameters_cat)
 
-    def _build_doc(self):
+    def _build_doc(self) -> str:
+        """Append variable and parameter metadata to the model description."""
         _doc_template_str = """{{base_doc}}
 
 Model Variables
@@ -159,45 +186,53 @@ Model Parameters
             parameters_cat=self._parameters_cat,
         )
 
-    def __init__(self, name, bases, attr):
+    def __init__(self, name: str, bases: tuple[type, ...], attr: dict[str, Any]) -> None:
+        """Populate class documentation after model creation."""
         self.__doc__ = self._build_doc()
 
 
 def prepare_data(
     df: pd.DataFrame,
-    inputs: Union[str, list],
-    outputs: Union[str, list, bool],
+    inputs: str | Sequence[str],
+    outputs: str | Sequence[str] | Literal[False],
     time_scale: str = "s",
-):
-    """Prepare data for the state-space model
+) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Prepare copied data as forward intervals, inputs, derivatives, and outputs.
 
     Parameters
     ----------
     df : pandas.DataFrame
-        Dataframe containing the data
-    inputs : str or list
-        Inputs names
-    outputs : str or list
-        Outputs names
+        Source with at least two rows. Its index supplies sample times.
+    inputs : str or sequence of str
+        Input column names.
+    outputs : str, sequence of str, or False
+        Output columns; False or an empty sequence produces one NaN column.
     time_scale : str, optional
-        Time scale, by default "s"
+        Unit for datetime-index intervals; numeric indexes retain their units.
 
     Returns
     -------
     dt : pandas.Series
-        Time steps
+        Forward intervals, shape (n,); the final interval repeats its predecessor.
     u : pandas.DataFrame
-        Inputs
+        Inputs, shape (n, nu).
     dtu : pandas.DataFrame
-        Inputs time derivative
+        Forward input derivatives, shape (n, nu); the final row is zero.
     y : pandas.DataFrame
-        Outputs
+        Outputs, shape (n, ny); NaN denotes a missing observation.
+
+    Raises
+    ------
+    KeyError
+        A requested column is absent.
+    ValueError
+        Time intervals, inputs, or derivatives contain nonfinite values.
     """
     df = df.copy()
     time = df.index.to_series()
     if not isinstance(df, pd.DataFrame):
         raise TypeError("`df` must be a dataframe")
-    time_scale = pd.to_timedelta(1, time_scale)
+    time_unit = cast(Callable[[int, str], pd.Timedelta], pd.to_timedelta)(1, time_scale)
 
     # diff and forward-fill the nan-last value
     dt = time.diff().shift(-1)
@@ -206,7 +241,7 @@ def prepare_data(
     if np.isclose(dt.to_numpy(), dt.iloc[0]).all():
         dt[:] = dt.iloc[0]
     if isinstance(df.index, pd.DatetimeIndex):
-        dt = dt / time_scale
+        dt = dt / time_unit
     else:
         dt = dt.astype(float)
 
@@ -225,10 +260,15 @@ def prepare_data(
         y = pd.DataFrame(data=np.full(len(df), np.nan), index=df.index)
     if not np.all(np.isnan(y[~np.isfinite(y)])):
         raise TypeError("The output vector must contains numerical values or numpy.nan")
-    return dt, u, dtu, y
+    return cast(pd.Series, dt), u, cast(pd.DataFrame, dtu), y
 
 
 class ContinuousStates(NamedTuple):
+    """Continuous A(nx,nx), B(nx,nu), C(ny,nx), D(ny,nu), Q(nx,nx), R(ny,ny).
+
+    Q and R are upper noise factors: their covariances are U.T @ U.
+    """
+
     A: np.ndarray
     B: np.ndarray
     C: np.ndarray
@@ -238,6 +278,11 @@ class ContinuousStates(NamedTuple):
 
 
 class DiscreteStates(NamedTuple):
+    """Discrete A(nx,nx), B0/B1(nx,nu), and upper process-noise factor Q(nx,nx).
+
+    B1 multiplies the input derivative; Q.T @ Q is the process covariance.
+    """
+
     A: np.ndarray
     B0: np.ndarray
     B1: np.ndarray
@@ -246,29 +291,52 @@ class DiscreteStates(NamedTuple):
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True), repr=False)
 class StateSpace(metaclass=MetaStateSpace):
-    """Linear Gaussian Continuous-Time State-Space Model"""
+    """Linear Gaussian continuous-time model with mutable system matrices.
 
-    parameters: Parameters = field(default=None, repr=False)
-    hold_order: conint(ge=0, le=1) = 0
+    A, B, C, D have shapes (nx,nx), (nx,nu), (ny,nx), (ny,nu).
+    Q, R and P0 are upper factors of process diffusion, measurement noise,
+    and initial-state covariance: each covariance is U.T @ U.
+    x0 has shape (nx,1). Updates consume physical (constrained) parameters.
+    """
+
+    parameters: Parameters | None = field(default=None, repr=False)
+    hold_order: Annotated[int, Field(ge=0, le=1)] = 0
     method: str = "mfd"
     name: str = ""
 
-    def _coerce_attributes(self):
+    @field_validator("parameters", mode="before")
+    @classmethod
+    def _validate_parameters(cls, parameters: Any) -> Parameters | None:
+        """Normalize dynamic constructor specifications to Parameters."""
+        if not parameters:
+            return None
+        if not isinstance(parameters, Parameters):
+            return Parameters(parameters)
+        return parameters
+
+    def _coerce_attributes(self) -> None:
+        """Normalize tuple metadata to Nodes and initialize Parameters.
+
+        Metadata declarations remain outside dataclass fields. Their union
+        describes both phases; after this method, instance views contain Nodes
+        and ``parameters`` is always a Parameters container.
+        """
         for attr in ["states", "params", "inputs", "outputs"]:
             setattr(self, attr, [Node(*s) for s in getattr(self, attr)])
-        self.states: Sequence[Node]
-        self.params: Sequence[Node]
-        self.inputs: Sequence[Node]
-        self.outputs: Sequence[Node]
+        self.states: list[Node] | list[tuple[str, str, str]] | tuple[tuple[str, str, str], ...]
+        self.params: list[Node] | list[tuple[str, str, str]] | tuple[tuple[str, str, str], ...]
+        self.inputs: list[Node] | list[tuple[str, str, str]] | tuple[tuple[str, str, str], ...]
+        self.outputs: list[Node] | list[tuple[str, str, str]] | tuple[tuple[str, str, str], ...]
 
         if self.parameters:
             if not isinstance(self.parameters, Parameters):
                 self.parameters = Parameters(self.parameters)
         else:
-            self.parameters = Parameters([p.name for p in self.params])
+            self.parameters = Parameters([p.name for p in cast(list[Node], self.params)])
         self.parameters.name = self.name
 
-    def _init_states(self):
+    def _init_states(self) -> None:
+        """Allocate continuous matrices, upper factors, and initial moments."""
         self.A = np.zeros((self.nx, self.nx))
         self.B = np.zeros((self.nx, self.nu))
         self.C = np.zeros((self.ny, self.nx))
@@ -280,7 +348,8 @@ class StateSpace(metaclass=MetaStateSpace):
         self._diag = np.diag_indices_from(self.A)
         self.set_constant_continuous_ssm()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
+        """Render model variables and current physical parameter values."""
         tpl = Template(
             """{{name}}
 {{'-' * name|length}}
@@ -314,74 +383,60 @@ Parameters:
             parameters=self.parameters,
         )
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Initialize the model name, metadata, parameters, and matrices."""
         if self.name == "":
             self.name = self.__class__.__name__
         self._coerce_attributes()
         self._init_states()
 
     @property
-    def nx(self):
+    def nx(self) -> int:
+        """Number of latent states."""
         return len(self.states)
 
     @property
-    def ny(self):
+    def ny(self) -> int:
+        """Number of observed outputs."""
         return len(self.outputs)
 
     @property
-    def nu(self):
+    def nu(self) -> int:
+        """Number of deterministic inputs."""
         return len(self.inputs)
 
-    def set_constant_continuous_ssm(self):
-        """Set constant values in state-space model"""
-        pass
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices; base hook does nothing."""
 
-    def update_continuous_ssm(self):
-        """Update the state-space model with the constrained parameters"""
-        pass
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices from physical parameters; base hook does nothing."""
 
-    def update(self):
-        """Update the state-space model with the constrained parameters"""
+    def update(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
         self.update_continuous_ssm()
 
     def get_discrete_ssm(self, dt: float) -> DiscreteStates:
-        """Return the updated discrete state-space model
+        """Update continuous matrices and return their discretization at ``dt``.
 
-        Parameters
-        ----------
-        dt : float
-            Sampling time
-
-        Returns
-        -------
-        DiscreteStates
-            Discrete state-space model, a 4-elements namedtuple containing
-            - A: Discrete state matrix
-            - B0: Discrete input matrix (zero order hold)
-            - B1: Discrete input matrix (first order hold)
-            - Q: Upper Cholesky factor of the process noise covariance matrix
+        ``dt`` uses the model time unit. Return a DiscreteStates named tuple:
+        A(nx,nx), B0(nx,nu), B1(nx,nu), Q(nx,nx). B0 multiplies input
+        values and B1 input derivatives (zero for zero-order hold).
+        Q is an upper factor, with covariance Q.T @ Q. Updating mutates the
+        continuous matrices and initial moments.
         """
         self.update_continuous_ssm()
         return DiscreteStates(*self.discretization(dt))
 
     def discretization(
         self, dt: float
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Discretization of LTI state-space model. Should be overloaded by subclasses.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Discretize the current continuous matrices without updating parameters.
 
-        Parameters
-        ----------
-        dt : float
-            Sampling time
-
-        Returns
-        -------
-        Tuple[np.ndarray, ...]
-            a 4-elements tuple containing
-            - A: Discrete state matrix
-            - B0: Discrete input matrix (zero order hold)
-            - B1: Discrete input matrix (first order hold)
-            - Q: Upper Cholesky factor of the process noise covariance matrix
+        ``dt`` uses the model time unit. Return the tuple (Ad, B0d, B1d, Qd)
+        with shapes (nx,nx), (nx,nu), (nx,nu), (nx,nx).
+        The augmented exponential supports singular A. B1d multiplies input
+        derivatives and is zero for zero-order hold. Qd is an upper factor:
+        the discrete process covariance is Qd.T @ Qd.
         """
 
         if self.nu == 0:
@@ -397,43 +452,46 @@ Parameters:
             discretization.diffusion_mfd(self.A, self.Q.T @ self.Q, dt)
         )
 
-        return Ad, B0d, B1d, Qd
+        # The default LDL factorization always returns an array.
+        return Ad, B0d, B1d, cast(np.ndarray, Qd)
 
     def prepare_data(
         self,
         df: pd.DataFrame,
-        inputs: Optional[Sequence[str]] = None,
-        outputs: Optional[Union[Sequence[str], Literal[False]]] = None,
+        inputs: str | Sequence[str] | None = None,
+        outputs: str | Sequence[str] | Literal[False] | None = None,
         time_scale: str = "s",
-    ):
-        """Prepare data for training
+    ) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Prepare data using model column names unless explicitly overridden.
 
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Dataframe containing the data
-        inputs : Optional[Sequence[str]], optional
-            List of input variables, by default None. If None, the inputs defined in
-            the model are used.
-        outputs : Optional[Sequence[str] or False], optional
-            List of output variables, by default None. If None, the outputs defined in
-            the model are used. If False, no output is returned.
+        The source frame is copied. ``inputs`` and ``outputs`` accept a column
+        name or sequence; None uses model metadata. False for ``outputs`` returns
+        one NaN column, not an omitted return value. ``time_scale`` selects the
+        interval unit for datetime indexes; numeric indexes retain their units.
+        At least two rows are required.
 
         Returns
         -------
-        DataFrame:
-            time steps
-        DataFrame:
-            input data
-        DataFrame:
-            derivative of input data
-        DataFrame:
-            output data (only if outputs is not False)
+        dt : pandas.Series
+            Forward intervals, shape (n,); the final interval is repeated.
+        u : pandas.DataFrame
+            Inputs, shape (n, nu).
+        dtu : pandas.DataFrame
+            Forward input derivatives, shape (n, nu), with a final zero row.
+        y : pandas.DataFrame
+            Outputs, shape (n, ny), allowing NaN missing observations.
+
+        Raises
+        ------
+        KeyError
+            A requested column is missing.
+        ValueError
+            Time intervals, inputs, or derivatives are nonfinite.
         """
         if inputs is None:
-            inputs = [par.name for par in self.inputs]
+            inputs = [par.name for par in cast(list[Node], self.inputs)]
         if outputs is None:
-            outputs = [par.name for par in self.outputs]
+            outputs = [par.name for par in cast(list[Node], self.outputs)]
         if isinstance(inputs, str):
             inputs = [inputs]
         if isinstance(outputs, str):
@@ -456,38 +514,21 @@ class RCModel(StateSpace):
 
     latent_forces: str = ""
 
-    def __post_init__(self):
-        super().__post_init__()
-        eig = np.real(np.linalg.eigvals(self.A))
-        if np.all(eig < 0) and eig.max() / eig.min():
-            self._method = "analytic"
-        else:
-            self._method = "mfd"
-
-    def __le__(self, gp):
-        """Create a Latent Force Model"""
+    def __le__(self, gp: "GPModel") -> StateSpace:
+        """Compose copied models, replacing the named input with a GP latent force."""
         from .latent_force_model import LatentForceModel
 
         return LatentForceModel(self, gp, self.latent_forces)
 
     def discretization(
         self, dt: float
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Discretization of RC model
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return (Ad, B0d, B1d, Qd) for the current thermal matrices at ``dt``.
 
-        Parameters
-        ----------
-        dt : float
-            Sampling time
-
-        Returns
-        -------
-        Tuple[np.ndarray, ...]
-            a 4-elements tuple containing
-            - A: Discrete state matrix
-            - B0: Discrete input matrix (zero order hold)
-            - B1: Discrete input matrix (first order hold)
-            - Q: Upper Cholesky factor of the process noise covariance matrix
+        Shapes and upper-factor convention match StateSpace.discretization.
+        ``method="analytic"`` uses linear solves and requires nonsingular A;
+        other method values use the augmented exponential and MFD covariance.
+        No parameter update is performed.
         """
 
         if self.method == "analytic":
@@ -505,18 +546,21 @@ class RCModel(StateSpace):
                 discretization.diffusion_mfd(self.A, self.Q.T @ self.Q, dt)
             )
 
-        return Ad, B0d, B1d, Qd
+        # The default LDL factorization always returns an array.
+        return Ad, B0d, B1d, cast(np.ndarray, Qd)
 
 
 class GPModel(StateSpace):
     """Gaussian Process"""
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Expand harmonic state blocks before initializing continuous matrices."""
         if hasattr(self, "J"):
-            self.states = self.states_block * int(self.J + 1)
+            self.states = cast(Any, self).states_block * int(cast(Any, self).J + 1)
         super().__post_init__()
 
-    def __mul__(self, gp: Self):
+    def __mul__(self, gp: "GPModel") -> "GPModel":
+        """Return a product-kernel model built from copies of both operands."""
         if not isinstance(gp, GPModel):
             raise TypeError("`gp` must be an GPModel instance")
         # TODO: refactor to avoid circular import
@@ -524,7 +568,8 @@ class GPModel(StateSpace):
 
         return GPProduct(self, gp)
 
-    def __add__(self, gp: Self):
+    def __add__(self, gp: "GPModel") -> "GPModel":
+        """Return an independent sum-kernel model built from copied operands."""
         if not isinstance(gp, GPModel):
             raise TypeError("`gp` must be an GPModel instance")
         # TODO: refactor to avoid circular import
@@ -534,22 +579,12 @@ class GPModel(StateSpace):
 
     def discretization(
         self, dt: float
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Discretization of the temporal Gaussian Process
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Discretize current GP matrices at ``dt`` using stationary covariance.
 
-        Parameters
-        ----------
-        dt : float
-            Sampling time
-
-        Returns
-        -------
-        Tuple[np.ndarray, ...]
-            a 4-elements tuple containing
-            - A: Discrete state matrix
-            - B0: Discrete input matrix (zero order hold)
-            - B1: Discrete input matrix (first order hold)
-            - Q: Upper Cholesky factor of the process noise covariance matrix
+        Return (Ad, B0d, B1d, Qd), with shapes and upper-factor convention as
+        in StateSpace.discretization. Both input matrices are zero and share
+        storage. P0.T @ P0 supplies stationary covariance; no update is performed.
         """
         Ad = discretization.state(self.A, dt)
         B0d = np.zeros((self.nx, self.nu))
@@ -557,4 +592,5 @@ class GPModel(StateSpace):
             discretization.diffusion_stationary(self.P0.T @ self.P0, Ad)
         )
 
-        return Ad, B0d, B0d, Qd
+        # The default LDL factorization always returns an array.
+        return Ad, B0d, B0d, cast(np.ndarray, Qd)

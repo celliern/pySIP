@@ -1,138 +1,164 @@
-from typing import Literal, Optional, Tuple
+"""Scalar parameters in physical, standardized, and optimization coordinates."""
 
-from pydantic import ConfigDict, confloat, validator
+from typing import Annotated, Literal, cast
+
+from pydantic import ConfigDict, Field, ValidationInfo, field_validator
 from pydantic.dataclasses import dataclass
 
 from pysip.params.prior import BasePrior
+
 from .transforms import FixedTransform, ParameterTransform, Transforms, auto_transform
 
 
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True, validate_default=True))
 class Parameter:
-    """A Parameter has a value in the constrained space θ and in the
-    unconstrained space η. See the documentation of the class for more details on the
-    different transformations.
+    """A scalar with physical θ = loc + scale * θ_sd and unconstrained η.
+
+    Transforms and bounds operate on standardized constrained θ_sd, not physical
+    θ. Assigning a coordinate property synchronizes the other coordinates.
 
     Parameters
     ----------
     name : str
         Parameter name
-    value : float
-        Parameter value
-    loc : float
-        Location value
-    scale : float
-        Scaling value
-    transform : str | ParameterTransform
-        Bijections transform θ -> η and untransform η -> θ
-    bounds : tuple
-        Parameters bounds
-    prior : rv_continuous
-        Prior distribution, using a scipy.stats distribution object.
+    value : float, optional
+        Initial standardized constrained θ_sd. If omitted, initialize at η = 0.
+    loc : float, default 0
+        Physical location offset.
+    scale : float, default 1
+        Strictly positive physical scaling factor.
+    transform : str or ParameterTransform, default "auto"
+        Map θ_sd to η. Auto selects identity, log, shifted log, or logit from
+        the bounds; "fixed" excludes the parameter from free vectors.
+    bounds : tuple of float or None, default (None, None)
+        Lower and upper standardized bounds; None denotes an unbounded side.
+    prior : BasePrior
+        Prior distribution on the standardized constrained value, not θ or η.
 
-    Attributes
-    ----------
-    theta : float
-        Parameter value in the constrained space θ
-    theta_sd : float
-        Parameter value in the standardized constrained space θ_sd
-    eta : float
-        Parameter value in the unconstrained space η
-    eta_sd : float
-        Parameter value in the standardized unconstrained space η_sd
-    free : bool
-        False if the parameter is fixed
+    Raises
+    ------
+    ValueError
+        If bounds are reversed or equal, scale is nonpositive, or the initial
+        standardized value fails the selected transform's bounds check.
     """
 
     name: str
-    value: float = None
+    value: float | None = None
     loc: float = 0.0
-    scale: confloat(gt=0) = 1.0
-    bounds: Tuple[Optional[float], Optional[float]] = (None, None)
+    scale: Annotated[float, Field(gt=0)] = 1.0
+    bounds: tuple[float | None, float | None] = (None, None)
     transform: ParameterTransform | Literal[
         "auto", "fixed", "none", "log", "lower", "upper", "logit"
     ] = "auto"
-    prior: BasePrior = None
+    prior: BasePrior | None = None
 
-    @validator("bounds")
-    def _validate_bounds(cls, bounds):
+    @field_validator("bounds")
+    @classmethod
+    def _validate_bounds(
+        cls, bounds: tuple[float | None, float | None]
+    ) -> tuple[float | None, float | None]:
+        """Reject finite bounds that do not define a nonempty interval."""
         lb, ub = bounds
         if lb is not None and ub is not None and lb >= ub:
             raise ValueError("`lb` must be lower than `ub`")
         return bounds
 
-    @validator("transform")
-    def _validate_transform(cls, transform, values):
+    @field_validator("transform")
+    @classmethod
+    def _validate_transform(
+        cls,
+        transform: ParameterTransform | Literal[
+            "auto", "fixed", "none", "log", "lower", "upper", "logit"
+        ],
+        info: ValidationInfo,
+    ) -> ParameterTransform | Literal[
+        "auto", "fixed", "none", "log", "lower", "upper", "logit"
+    ]:
+        """Resolve a transform name using already validated standardized bounds."""
         if isinstance(transform, ParameterTransform):
             return transform
-        bounds = values.get("bounds")
+        bounds = info.data.get("bounds")
+        if bounds is None:
+            return transform
         if transform == "auto":
             return auto_transform(bounds)
         return Transforms.get(transform)(bounds)
 
-    def __post_init_post_parse__(self):
+    def __post_init__(self) -> None:
+        """Initialize synchronized coordinates and check transform bounds."""
         if self.value is None:
             self.eta = 0.0
         else:
             self.theta = self.loc + self.scale * self.value
-        if not self.transform.in_bounds(self.value):
+        if not self._transform.in_bounds(self.theta_sd):
             raise ValueError(
                 f"Initial value {self.value} is out of bounds {self.bounds}"
             )
 
     @property
+    def _transform(self) -> ParameterTransform:
+        """Return the transform instance resolved by Pydantic before post-init."""
+        return cast(ParameterTransform, self.transform)
+
+    @property
     def theta(self) -> float:
-        """Returns constrained parameter value θ"""
-        return self.loc + self.scale * self.value
+        """Physical constrained θ; assignment also synchronizes θ_sd and η."""
+        return self.loc + self.scale * self.theta_sd
 
     @theta.setter
-    def theta(self, x):
-        """Set constrained parameter value θ"""
+    def theta(self, x: float) -> None:
+        """Set physical θ and synchronize standardized and unconstrained values."""
         self.value = (x - self.loc) / self.scale
-        self._eta = self.transform.transform(self.value)
+        self._eta = self._transform.transform(self.theta_sd)
 
     @property
     def theta_sd(self) -> float:
-        return self.value
+        """Standardized constrained value; assigning it also synchronizes η."""
+        # Post-init initializes value through a coordinate setter when omitted.
+        return cast(float, self.value)
 
     @theta_sd.setter
-    def theta_sd(self, x):
+    def theta_sd(self, x: float) -> None:
+        """Set standardized constrained θ_sd and synchronize η."""
         self.value = x
-        self.transform.transform(self.value)
+        self._eta = self._transform.transform(self.theta_sd)
 
     @property
     def eta(self) -> float:
+        """Unconstrained η; assignment also synchronizes θ_sd and physical θ."""
         return self._eta
 
     @eta.setter
-    def eta(self, x):
+    def eta(self, x: float) -> None:
+        """Set unconstrained η and synchronize constrained values."""
         self._eta = x
-        self.value = self.transform.untransform(self._eta)
+        self.value = self._transform.untransform(self._eta)
 
     @property
     def free(self) -> bool:
+        """Whether this parameter participates in free parameter vectors."""
         return not isinstance(self.transform, FixedTransform)
 
-    def get_transformed(self):
-        """Do inverse transformation θsd = f^{-1}(η)"""
-        return self.transform.transform(self._eta)
+    def get_transformed(self) -> float:
+        """Apply the forward transform to the stored η (not to θ_sd)."""
+        return self._transform.transform(self._eta)
 
-    def get_transform_jacobian(self):
-        """Get the jacobian of η = f(θsd)"""
-        return self.transform.grad_transform(self.value)
+    def get_transform_jacobian(self) -> float:
+        """Return dη/dθ_sd at the current standardized value."""
+        return self._transform.grad_transform(self.theta_sd)
 
-    def get_inv_transformed(self):
-        """Do inverse transformation θsd = f^{-1}(η)"""
-        return self.transform.untransform(self._eta)
+    def get_inv_transformed(self) -> float:
+        """Return θ_sd by applying the inverse transform to stored η."""
+        return self._transform.untransform(self._eta)
 
     def get_inv_transform_jacobian(self) -> float:
-        """Get the jacobian of θsd = f⁻¹(η)"""
-        return self.transform.grad_untransform(self._eta)
+        """Return dθ_sd/dη at the current unconstrained value."""
+        return self._transform.grad_untransform(self._eta)
 
     def get_penalty(self) -> float:
-        """Penalty function"""
-        return self.transform.penalty(self.value)
+        """Return the transform's bound penalty at current θ_sd."""
+        return self._transform.penalty(self.theta_sd)
 
     def get_grad_penalty(self) -> float:
-        """Penalty function"""
-        return self.transform.grad_penalty(self.value)
+        """Return the derivative of the bound penalty with respect to θ_sd."""
+        return self._transform.grad_penalty(self.theta_sd)

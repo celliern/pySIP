@@ -1,20 +1,37 @@
-from copy import deepcopy
+"""Square-root Kalman inference and simulation.
+
+Kernel vectors are columns: states ``(nx, 1)``, inputs ``(nu, 1)`` and
+observations ``(ny, 1)``; trajectories have a leading time axis. Kernel ``P``,
+``P0``, ``Q``, ``R`` and innovation ``S`` are upper covariance factors:
+the corresponding covariance is ``factor.T @ factor``. Returned
+``KalmanResult.P`` instead contains full covariance matrices. NaN observations
+are omitted from updates and retain NaN residual entries.
+"""
+
 import math
-from typing import NamedTuple, Sequence
 import warnings
+from collections.abc import Hashable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
+from typing import NamedTuple, overload
+
 import numpy as np
 import pandas as pd
-from .statespace.base import StateSpace
-
-from numba.core.errors import NumbaPerformanceWarning
 import xarray as xr
+from numba.core.errors import NumbaPerformanceWarning
 
+from .statespace.base import StateSpace
 
 #### Models, compatible with the Numba implementation of the Kalman filter ####
 
 
 class States(NamedTuple):
+    """System matrices; A/B0/B1/Q may have a final time axis.
+
+    A/Q are ``(nx, nx)``, B0/B1 ``(nx, nu)``, C ``(ny, nx)``,
+    D ``(ny, nu)`` and R ``(ny, ny)`` at one step. Q/R are upper factors.
+    """
+
     A: np.ndarray
     B0: np.ndarray
     B1: np.ndarray
@@ -25,12 +42,23 @@ class States(NamedTuple):
 
 
 class KalmanResult(NamedTuple):
+    """State means, full covariances, whitened residuals and upper factors.
+
+    Fields x/P/k/S have shapes ``(nt, nx, 1)``, ``(nt, nx, nx)``,
+    ``(nt, ny, 1)`` and ``(nt, ny, ny)``. k is not a Kalman gain;
+    S is the innovation factor, not a covariance or marginal deviation.
+    """
+
     x: np.ndarray
     P: np.ndarray
     k: np.ndarray
     S: np.ndarray
 
-    def to_xarray(self, idx_name, time, states, outputs):
+    def to_xarray(
+        self, idx_name: Hashable, time: pd.Index | np.ndarray,
+        states: Sequence[str], outputs: Sequence[str],
+    ) -> xr.Dataset:
+        """Label trajectory arrays, removing the trailing vector singleton axis."""
         coords = {
             idx_name: time,
             "states": states,
@@ -48,7 +76,8 @@ class KalmanResult(NamedTuple):
         return ds
 
 
-def _allocate_kalman_res(n_timesteps, nx, ny):
+def _allocate_kalman_res(n_timesteps: int, nx: int, ny: int) -> KalmanResult:
+    """Allocate uninitialized time-major filtering result arrays."""
     return KalmanResult(
         np.empty((n_timesteps, nx, 1)),
         np.empty((n_timesteps, nx, nx)),
@@ -57,7 +86,11 @@ def _allocate_kalman_res(n_timesteps, nx, ny):
     )
 
 
-def _pack_kalman_res(res, i, value):
+def _pack_kalman_res(
+    res: KalmanResult, i: int,
+    value: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+) -> None:
+    """Write mean, full covariance, residual and factor into result row i."""
     (
         res.x[i],
         res.P[i],
@@ -67,10 +100,16 @@ def _pack_kalman_res(res, i, value):
 
 
 class SimulationResults(NamedTuple):
+    """Simulated outputs ``(nt, ny, 1)`` and states ``(nt, nx, 1)``."""
+
     y: np.ndarray
     x: np.ndarray
 
-    def to_xarray(self, idx_name, time, states, outputs):
+    def to_xarray(
+        self, idx_name: Hashable, time: pd.Index | np.ndarray,
+        states: Sequence[str], outputs: Sequence[str],
+    ) -> xr.Dataset:
+        """Label simulated trajectories and remove vector singleton axes."""
         coords = {
             idx_name: time,
             "states": states,
@@ -86,22 +125,32 @@ class SimulationResults(NamedTuple):
         return ds
 
 
-def _allocate_simulation_res(n_timesteps, nx, ny):
+def _allocate_simulation_res(n_timesteps: int, nx: int, ny: int) -> SimulationResults:
+    """Allocate uninitialized time-major simulation arrays."""
     return SimulationResults(
         np.empty((n_timesteps, ny, 1)),
         np.empty((n_timesteps, nx, 1)),
     )
 
 
-def _pack_simulate(res, i, value):
+def _pack_simulate(
+    res: SimulationResults, i: int, value: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """Write an output/state pair into result row i in place."""
     res.y[i], res.x[i] = value
 
 
 class OutputEstimateResult(NamedTuple):
+    """Output means and marginal deviations, both shaped ``(nt, ny, 1)``."""
+
     y: np.ndarray
     y_std: np.ndarray
 
-    def to_xarray(self, idx_name, time, states, outputs):
+    def to_xarray(
+        self, idx_name: Hashable, time: pd.Index | np.ndarray,
+        states: Sequence[str], outputs: Sequence[str],
+    ) -> xr.Dataset:
+        """Label output means/deviations; states supplies the state coordinate."""
         coords = {
             idx_name: time,
             "states": states,
@@ -117,30 +166,28 @@ class OutputEstimateResult(NamedTuple):
         return ds
 
 
-def _pack_output_res(res, i, value):
-    res.y[i], res.y_std[i] = value
-
-
-def _allocate_output_res(n_timestep, ny):
-    return OutputEstimateResult(
-        np.empty((n_timestep, ny, 1)),
-        np.empty((n_timestep, ny, 1)),
-    )
 
 
 #### Pure python / numpy implementation of the Kalman filter ####
 # they are not efficient par their own, and are therefore jitted by numba
 
 
-def _solve_triu_inplace(A, b):
+def _solve_tril_transpose_inplace(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Solve ``A.T @ x = b`` for upper A, overwriting column vector b."""
     for i in range(b.shape[0]):
-        b[i] = (b[i] - A[i, i + 1 :] @ b[i + 1 :]) / A[i, i]
+        b[i] = (b[i] - A[:i, i] @ b[:i]) / A[i, i]
     return b
 
 
 def _update(
-    C, D, R, x, P, u, y, _Arru
+    C: np.ndarray, D: np.ndarray, R: np.ndarray, x: np.ndarray,
+    P: np.ndarray, u: np.ndarray, y: np.ndarray, _Arru: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return updated mean/factor, whitened residual and innovation factor.
+
+    Uses column vectors and upper covariance factors; overwrites the square
+    ``(nx + ny, nx + ny)`` QR workspace _Arru, whose upper-right block is zero.
+    """
     ny, _ = C.shape
     _Arru[:ny, :ny] = R
     _Arru[ny:, :ny] = P @ C.T
@@ -151,34 +198,66 @@ def _update(
         k = (y - C @ x - D @ u) / S[0, 0]
         x = x + r_fact[:1, 1:].T * k
     else:
-        k = _solve_triu_inplace(S, y - C @ x - D @ u)
+        k = _solve_tril_transpose_inplace(S, y - C @ x - D @ u)
         x = x + r_fact[:ny, ny:].T @ k
     P = r_fact[ny:, ny:]
     return x, P, k, S
 
 
-def _predict(A, B0, B1, Q, x, P, u, dtu) -> tuple[np.ndarray, np.ndarray]:
+def _predict(
+    A: np.ndarray, B0: np.ndarray, B1: np.ndarray, Q: np.ndarray,
+    x: np.ndarray, P: np.ndarray, u: np.ndarray, dtu: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Propagate column mean x and upper factor P without modifying inputs."""
     _, r = np.linalg.qr(np.vstack((P @ A.T, Q)))
     x = A @ x + B0 @ u + B1 @ dtu
     return x, r
 
 
+def _update_observed(
+    C: np.ndarray, D: np.ndarray, R: np.ndarray, x: np.ndarray,
+    P: np.ndarray, u: np.ndarray, y: np.ndarray, _Arru: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Update observed channels, mutating workspace and padding missing k/S with NaN."""
+    ny, nx = C.shape
+    if not np.isnan(y).any():
+        return _update(C, D, R, x, P, u, y, _Arru)
+    observed = np.flatnonzero(~np.isnan(y[:, 0]))
+    k = np.full((ny, 1), np.nan)
+    S = np.full((ny, ny), np.nan)
+    if observed.size:
+        # Selecting factor columns preserves the marginal covariance R.T @ R.
+        _, R_obs = np.linalg.qr(R[:, observed])
+        work = np.zeros((nx + observed.size, nx + observed.size))
+        x, P, k_obs, S_obs = _update(
+            C[observed], D[observed], R_obs, x, P, u, y[observed], work
+        )
+        for i in range(observed.size):
+            k[observed[i]] = k_obs[i]
+            for j in range(observed.size):
+                S[observed[i], observed[j]] = S_obs[i, j]
+    return x, P, k, S
+
+
 def _kalman_step(
-    x, P, u, dtu, y, states, _Arru
+    x: np.ndarray, P: np.ndarray, u: np.ndarray, dtu: np.ndarray,
+    y: np.ndarray, states: States, _Arru: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if ~np.isnan(y).any():
-        x_up, P_up, k, S = _update(states.C, states.D, states.R, x, P, u, y, _Arru)
-    else:
-        x_up, P_up = x, P
-        k = np.full((states.C.shape[0], 1), np.nan)
-        S = np.full((states.C.shape[0], states.C.shape[0]), np.nan)
+    """Update then predict; return updated x/P/k/S and predicted x/P.
+
+    P and S are upper factors; only the shared QR workspace is overwritten.
+    """
+    x_up, P_up, k, S = _update_observed(
+        states.C, states.D, states.R, x, P, u, y, _Arru
+    )
     x_pred, P_pred = _predict(
         states.A, states.B0, states.B1, states.Q, x_up, P_up, u, dtu
     )
     return x_up, P_up, k, S, x_pred, P_pred
 
 
-def _unpack_states(states, i) -> States:
+def _unpack_states(states: States, i: int) -> States:
+    """Select time i from time-varying matrices, retaining static C/D/R."""
     return States(
         states.A[:, :, i],
         states.B0[:, :, i],
@@ -190,37 +269,45 @@ def _unpack_states(states, i) -> States:
     )
 
 
-def _log_likelihood(x0, P0, u, dtu, y, states) -> float:
+def _log_likelihood(
+    x0: np.ndarray, P0: np.ndarray, u: np.ndarray, dtu: np.ndarray,
+    y: np.ndarray, states: States,
+) -> float:
+    """Sum scalar negative Gaussian log likelihood over observed trajectory entries."""
     x = x0
     P = P0
     n_timesteps = y.shape[0]
     ny, nx = states.C.shape
     dtype = states.A.dtype
     _Arru = np.zeros((nx + ny, nx + ny), dtype=dtype)
-    log_likelihood = 0.5 * n_timesteps * math.log(2.0 * math.pi)
+    log_likelihood = 0.0
     for i in range(n_timesteps):
-        y_i = np.ascontiguousarray(y)[i].reshape(-1, 1)
-        u_i = np.ascontiguousarray(u)[i].reshape(-1, 1)
-        dtu_i = np.ascontiguousarray(dtu)[i].reshape(-1, 1)
+        y_i = y[i].reshape(-1, 1)
+        u_i = u[i].reshape(-1, 1)
+        dtu_i = dtu[i].reshape(-1, 1)
         states_i = _unpack_states(states, i)
-        if ~np.isnan(y_i).any():
-            x, P, k, S = _update(
-                states_i.C, states_i.D, states_i.R, x, P, u_i, y_i, _Arru
-            )
-            if ny == 1:
-                Si = S[0, 0]
-                log_likelihood += (
-                    math.log(abs(Si.real) + abs(Si.imag)) + 0.5 * k[0, 0] ** 2
-                )
-            else:
-                log_likelihood += np.linalg.slogdet(S)[1] + 0.5 * (k.T @ k)[0, 0]
-        x, P = _predict(
-            states_i.A, states_i.B0, states_i.B1, states_i.Q, x, P, u_i, dtu_i
+        _, _, k, S, x, P = _kalman_step(
+            x, P, u_i, dtu_i, y_i, states_i, _Arru
         )
+        for j in range(ny):
+            if not np.isnan(y_i[j, 0]):
+                log_likelihood += (
+                    0.5 * math.log(2.0 * math.pi)
+                    + math.log(abs(S[j, j]))
+                    + 0.5 * k[j, 0] ** 2
+                )
     return log_likelihood
 
 
-def _filtering(x0, P0, u, dtu, y, states) -> KalmanResult:
+def _filtering(
+    x0: np.ndarray, P0: np.ndarray, u: np.ndarray, dtu: np.ndarray,
+    y: np.ndarray, states: States,
+) -> KalmanResult:
+    """Filter time-major u/dtu/y using column x0 and upper factor P0.
+
+    Returns filtered means, full covariances, whitened residuals and upper
+    innovation factors; fills newly allocated result/work arrays in place.
+    """
     x = x0
     P = P0
     n_timesteps = y.shape[0]
@@ -229,16 +316,24 @@ def _filtering(x0, P0, u, dtu, y, states) -> KalmanResult:
     _Arru = np.zeros((nx + ny, nx + ny), dtype=dtype)
     res = _allocate_kalman_res(n_timesteps, nx, ny)
     for i in range(n_timesteps):
-        y_i = np.ascontiguousarray(y)[i].reshape(-1, 1)
-        u_i = np.ascontiguousarray(u)[i].reshape(-1, 1)
-        dtu_i = np.ascontiguousarray(dtu)[i].reshape(-1, 1)
+        y_i = y[i].reshape(-1, 1)
+        u_i = u[i].reshape(-1, 1)
+        dtu_i = dtu[i].reshape(-1, 1)
         states_i = _unpack_states(states, i)
         x_up, P_up, k, S, x, P = _kalman_step(x, P, u_i, dtu_i, y_i, states_i, _Arru)
         _pack_kalman_res(res, i, (x_up, P_up.T @ P_up, k, S))
     return res
 
 
-def _smoothing(x0, P0, u, dtu, y, states) -> tuple[np.ndarray, np.ndarray]:
+def _smoothing(
+    x0: np.ndarray, P0: np.ndarray, u: np.ndarray, dtu: np.ndarray,
+    y: np.ndarray, states: States,
+) -> KalmanResult:
+    """Apply RTS smoothing to filtered trajectories in newly allocated storage.
+
+    Updates result x/P in place to smoothed means/full covariances; k/S retain
+    filtering residuals/upper factors. Input shapes match _filtering.
+    """
     x = x0
     P = P0
     n_timesteps = y.shape[0]
@@ -249,9 +344,9 @@ def _smoothing(x0, P0, u, dtu, y, states) -> tuple[np.ndarray, np.ndarray]:
     Pp = np.empty((n_timesteps, nx, nx), dtype=dtype)
     res = _allocate_kalman_res(n_timesteps, nx, ny)
     for i in range(n_timesteps):
-        y_i = np.ascontiguousarray(y)[i].reshape(-1, 1)
-        u_i = np.ascontiguousarray(u)[i].reshape(-1, 1)
-        dtu_i = np.ascontiguousarray(dtu)[i].reshape(-1, 1)
+        y_i = y[i].reshape(-1, 1)
+        u_i = u[i].reshape(-1, 1)
+        dtu_i = dtu[i].reshape(-1, 1)
         states_i = _unpack_states(states, i)
         xp[i] = x
         Pp[i] = P.T @ P
@@ -265,42 +360,35 @@ def _smoothing(x0, P0, u, dtu, y, states) -> tuple[np.ndarray, np.ndarray]:
     return res
 
 
-def _simulate(x0, u, dtu, states) -> SimulationResults:
-    x = x0
-    n_timesteps = u.shape[0]
+def _simulate(
+    x0: np.ndarray, P0: np.ndarray, u: np.ndarray, dtu: np.ndarray,
+    states: States, random_seed: int | None = None,
+) -> SimulationResults:
+    """Draw time-major state/output trajectories using upper noise factors.
+
+    Seeds the kernel's NumPy random state when requested, including the initial
+    draw from covariance P0.T @ P0; records outputs before each transition.
+    """
+    if random_seed is not None:
+        np.random.seed(random_seed)
     ny, nx = states.C.shape
+    x = x0 + P0.T @ np.random.randn(nx, 1)
+    n_timesteps = u.shape[0]
     res = _allocate_simulation_res(n_timesteps, nx, ny)
     for i in range(n_timesteps):
-        u_i = np.ascontiguousarray(u)[i].reshape(-1, 1)
-        dtu_i = np.ascontiguousarray(dtu)[i].reshape(-1, 1)
+        u_i = u[i].reshape(-1, 1)
+        dtu_i = dtu[i].reshape(-1, 1)
         states_i = _unpack_states(states, i)
-        y = states_i.C @ x - states_i.D @ u_i
-        x = (
-            states_i.A @ x
-            + states_i.B0 @ u_i
-            + states_i.B1 @ dtu_i
-            + states_i.Q @ np.random.randn(nx, 1)
-        )
+        y = states_i.C @ x + states_i.D @ u_i + states_i.R.T @ np.random.randn(ny, 1)
         _pack_simulate(res, i, (y, x))
-    # add noise to the output
-    res.y += states.R @ np.random.randn(n_timesteps, ny, 1)
+        if i + 1 < n_timesteps:
+            x = (
+                states_i.A @ x
+                + states_i.B0 @ u_i
+                + states_i.B1 @ dtu_i
+                + states_i.Q.T @ np.random.randn(nx, 1)
+            )
     return res
-
-
-def _estimate_output(x0, P0, u, dtu, y, states) -> OutputEstimateResult:
-    n_timesteps = y.shape[0]
-    ny = states.C.shape[0]
-
-    res_filter = _filtering(x0, P0, u, dtu, y, states)
-    output_res = _allocate_output_res(n_timesteps, ny)
-    for i in range(n_timesteps):
-        x = res_filter.x[i]
-        P = res_filter.P[i]
-        states_i = _unpack_states(states, i)
-        output_res.y[i] = states_i.C @ x - states_i.D @ u[i]
-        output_res.y_std[i] = np.sqrt(states_i.C @ P @ states_i.C.T) + states_i.R
-
-    return output_res
 
 
 # All above will be jitted by numba, if available. Otherwise, the pure python / numpy
@@ -313,23 +401,59 @@ except ImportError:
     warnings.warn("Numba not installed, using pure python implementation")
 
 
+def output_moments(
+    C: np.ndarray, D: np.ndarray, R: np.ndarray, x: np.ndarray,
+    P: np.ndarray, u: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return output mean and marginal standard deviation, shaped ``(..., ny, 1)``.
+
+    C/D/R have shapes ``(ny, nx)``, ``(ny, nu)``, ``(ny, ny)``.
+    x/u are column vectors with optional leading batch dimensions; P contains
+    full state covariances ``(..., nx, nx)``, not factors. R is an upper
+    measurement covariance factor. Inputs are not modified.
+    """
+    mean = C @ x + D @ u
+    variance = np.sum((C @ P) * C, axis=-1) + np.sum(R * R, axis=0)
+    return mean, np.sqrt(variance)[..., None]
+
+
+def _estimate_output(
+    x0: np.ndarray, P0: np.ndarray, u: np.ndarray, dtu: np.ndarray,
+    y: np.ndarray, states: States,
+) -> OutputEstimateResult:
+    """Return filtered output means/deviations, including measurement noise."""
+    res = _filtering(x0, P0, u, dtu, y, states)
+    mean, std = output_moments(
+        states.C, states.D, states.R, res.x, res.P, u[..., None]
+    )
+    return OutputEstimateResult(mean, std)
+
+
 @dataclass
 class KalmanQR:
-    """Bayesian Filter (Kalman Square Root filter)
+    """Square-root Kalman inference for a mutable StateSpace model.
 
-    Parameters
-    ----------
-    ss : StateSpace
-        State space model.
-
-    Notes
-    -----
-
-    All the method except _proxy_params are jitted by numba, if available. Otherwise,
-    the pure (but slower) python / numpy implementation will be used.
+    Public trajectory methods update/discretize ss before running compiled
+    kernels. Initial P0 and single-step P are upper covariance factors, while
+    filtering/smoothing result P contains full covariances. Input pandas rows
+    share observation times; u/dtu have nu columns and y has ny columns.
     """
 
     ss: StateSpace
+
+    @overload
+    def _proxy_params(
+        self, dt: pd.Series, vars: tuple[pd.DataFrame, pd.DataFrame],
+        x0: np.ndarray | None = None, P0: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, States]:
+        """Prepare simulation inputs without observations."""
+
+    @overload
+    def _proxy_params(
+        self, dt: pd.Series, vars: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame],
+        x0: np.ndarray | None = None, P0: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, States]:
+        """Prepare inference inputs including observations."""
 
     def _proxy_params(
         self,
@@ -337,7 +461,12 @@ class KalmanQR:
         vars: Sequence[pd.DataFrame],
         x0: np.ndarray | None = None,
         P0: np.ndarray | None = None,
-    ):
+    ) -> tuple[np.ndarray | States, ...]:
+        """Update ss and prepare contiguous arrays plus time-indexed matrices.
+
+        Returns x0, upper factor P0, each supplied time-major dataframe array,
+        and States. Model matrices are refreshed in place.
+        """
         ss = self.ss
         ss.update()
         dts, idx = np.unique(dt, return_inverse=True)
@@ -351,11 +480,11 @@ class KalmanQR:
         B1[:] = B1i[:, :, idx]
         Q[:] = Qi[:, :, idx]
 
-        vars = [var.to_numpy() for var in vars]
+        arrays = [np.ascontiguousarray(var.to_numpy()) for var in vars]
         states = States(A, B0, B1, ss.C, ss.D, Q, ss.R)
-        x0 = x0 if x0 is not None else ss.x0
-        P0 = P0 if P0 is not None else ss.P0
-        return tuple([x0, P0, *vars, states])
+        x0 = np.ascontiguousarray(x0 if x0 is not None else ss.x0)
+        P0 = np.ascontiguousarray(P0 if P0 is not None else ss.P0)
+        return (x0, P0, *arrays, states)
 
     def update(
         self,
@@ -364,29 +493,25 @@ class KalmanQR:
         u: np.ndarray,
         y: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Update the state and covariance of the current time step.
-
-        Note that this function will not update the statespace model to ensure the
-        consistency with the model parameters : to do so, use the `filter.ss.update`
-        method.
+        """Update a state without refreshing ss or modifying input arrays.
 
         Parameters
         ----------
-        x : np.ndarray
-            State (or endogeneous) vector.
-        P : np.ndarray
-            Covariance matrix.
-        u : np.ndarray
-            Output (or exogeneous) vector.
-        y : np.ndarray
-            Measurement (or observation) vector.
+        x : np.ndarray, shape (nx, 1)
+            Prior state mean.
+        P : np.ndarray, shape (nx, nx)
+            Upper prior covariance factor.
+        u : np.ndarray, shape (nu, 1)
+            Exogenous inputs.
+        y : np.ndarray, shape (ny, 1)
+            Observations; NaN channels are omitted.
 
         Returns
         -------
-        x : np.ndarray
-            State (or endogeneous) vector.
-        P : np.ndarray
-            Covariance matrix.
+        tuple of np.ndarray
+            Updated mean, upper state factor, whitened residual k and upper
+            innovation factor S. Missing-channel k/S entries are NaN.
+            Call ss.update() explicitly after changing parameters.
         """
         x, P = deepcopy(x), deepcopy(P)
         nx = self.ss.nx
@@ -397,7 +522,7 @@ class KalmanQR:
         _Arru = np.zeros((nx + ny, nx + ny))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=NumbaPerformanceWarning)
-            return _update(C, D, R, x, P, u, y, _Arru)
+            return _update_observed(C, D, R, x, P, u, y, _Arru)
 
     def predict(
         self,
@@ -407,27 +532,25 @@ class KalmanQR:
         dtu: np.ndarray,
         dt: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Predict the state and covariance of the next time step.
+        """Predict next mean and upper covariance factor without mutating inputs.
 
         Parameters
         ----------
-        x : np.ndarray
-            State (or endogeneous) vector.
-        P : np.ndarray
-            Covariance matrix.
-        u : np.ndarray
-            Output (or exogeneous) vector.
-        dtu : np.ndarray
-            Time derivative of the output vector.
+        x : np.ndarray, shape (nx, 1)
+            Current state mean.
+        P : np.ndarray, shape (nx, nx)
+            Upper state covariance factor.
+        u : np.ndarray, shape (nu, 1)
+            Exogenous inputs.
+        dtu : np.ndarray, shape (nu, 1)
+            Input time derivatives.
         dt : float
-            Time step.
+            Transition duration.
 
         Returns
         -------
-        np.ndarray
-            Predicted state vector.
-        np.ndarray
-            Predicted covariance matrix.
+        tuple of np.ndarray
+            Predicted column mean and upper factor of the next covariance.
         """
         x, P = deepcopy(x), deepcopy(P)
         A, B0, B1, Q = self.ss.discretization(dt)
@@ -442,29 +565,30 @@ class KalmanQR:
         dtu: pd.DataFrame,
         y: pd.DataFrame,
     ) -> float:
-        """Compute the log-likelihood of the model.
+        """Return scalar negative Gaussian log likelihood of observed data.
 
         Parameters
         ----------
-        dt : pd.Series
-            Time steps.
-        u : pd.DataFrame
-            Output (or exogeneous) vector.
-        dtu : pd.DataFrame
-            Time derivative of the output vector.
-        y : pd.DataFrame
-            Measurement (or observation) vector.
+        dt : pd.Series, shape (nt,)
+            Time steps in model units.
+        u : pd.DataFrame, shape (nt, nu)
+            Exogenous inputs.
+        dtu : pd.DataFrame, shape (nt, nu)
+            Input time derivatives.
+        y : pd.DataFrame, shape (nt, ny)
+            Observations; NaNs are omitted.
 
         Returns
         -------
         float
-            Log-likelihood of the model.
+            Summed negative log likelihood, not pointwise densities.
+            Refreshes model matrices using current parameters.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=NumbaPerformanceWarning)
-            x0, P0, u, dtu, y, states = self._proxy_params(dt, (u, dtu, y))
+            x0, P0, u_array, dtu_array, y_array, states = self._proxy_params(dt, (u, dtu, y))
 
-            return _log_likelihood(x0, P0, u, dtu, y, states)
+            return _log_likelihood(x0, P0, u_array, dtu_array, y_array, states)
 
     def filtering(
         self,
@@ -475,50 +599,38 @@ class KalmanQR:
         x0: np.ndarray | None = None,
         P0: np.ndarray | None = None,
     ) -> KalmanResult:
-        """Filter the data using the state space model and the Kalman filter.
+        """Return filtered states and innovations, refreshing model matrices.
 
         Parameters
         ----------
-        dt : pd.Series
-            Time steps.
-        u : pd.DataFrame
-            Output (or exogeneous) vector.
-        dtu : pd.DataFrame
-            Time derivative of the output vector.
-        y : pd.DataFrame
-            Measurement (or observation) vector.
-        x0 : np.ndarray, optional
-            Initial state vector, by default None. If None, the initial state vector
-            provided by the statespace model is used.
-        P0 : np.ndarray, optional
-            Initial covariance matrix, by default None. If None, the initial covariance
-            matrix provided by the statespace model is used.
+        dt : pd.Series, shape (nt,)
+            Time steps in model units.
+        u : pd.DataFrame, shape (nt, nu)
+            Exogenous inputs.
+        dtu : pd.DataFrame, shape (nt, nu)
+            Input time derivatives.
+        y : pd.DataFrame, shape (nt, ny)
+            Observations; NaN channels are omitted from each update.
+        x0 : np.ndarray, shape (nx, 1), optional
+            Initial mean; defaults to ss.x0.
+        P0 : np.ndarray, shape (nx, nx), optional
+            Upper initial covariance factor; defaults to ss.P0.
 
         Returns
         -------
-        FilteringResults
-            Result of the filtering in the form of a namedtuple with the following
-            fields:
-
-            - x_update: np.ndarray[n_timesteps, nx, 1]
-                Updated state vector.
-            - P_update: np.ndarray[n_timesteps, nx, nx]
-                Updated covariance matrix.
-            - x_predict: np.ndarray[n_timesteps, nx, 1]
-                Predicted state vector.
-            - P_predict: np.ndarray[n_timesteps, nx, nx]
-                Predicted covariance matrix.
-            - k: np.ndarray[n_timesteps, ny, 1]
-                Kalman gain.
-            - S: np.ndarray[n_timesteps, ny, ny]
-                Innovation covariance matrix.
-
+        KalmanResult
+            x: filtered means ``(nt, nx, 1)``; P: full covariances
+            ``(nt, nx, nx)``; k: whitened residuals ``(nt, ny, 1)``;
+            S: upper innovation factors ``(nt, ny, ny)``.
+            Missing-channel k/S entries are NaN. Input arrays are not modified.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=NumbaPerformanceWarning)
-            x0, P0, u, dtu, y, states = self._proxy_params(dt, (u, dtu, y), x0, P0)
+            x0, P0, u_array, dtu_array, y_array, states = self._proxy_params(
+                dt, (u, dtu, y), x0, P0
+            )
 
-            return _filtering(x0, P0, u, dtu, y, states)
+            return _filtering(x0, P0, u_array, dtu_array, y_array, states)
 
     def smoothing(
         self,
@@ -529,54 +641,38 @@ class KalmanQR:
         x0: np.ndarray | None = None,
         P0: np.ndarray | None = None,
     ) -> KalmanResult:
-        """Smooth the data using the state space model and the Kalman filter.
+        """Return RTS-smoothed states with filtering innovations.
 
         Parameters
         ----------
-        dt : pd.Series
-            Time steps.
-        u : pd.DataFrame
-            Output (or exogeneous) vector.
-        dtu : pd.DataFrame
-            Time derivative of the output vector.
-        y : pd.DataFrame
-            Measurement (or observation) vector.
-        x0 : np.ndarray, optional
-            Initial state vector, by default None. If None, the initial state vector
-            provided by the statespace model is used.
-        P0 : np.ndarray, optional
-            Initial covariance matrix, by default None. If None, the initial covariance
-            matrix provided by the statespace model is used.
+        dt : pd.Series, shape (nt,)
+            Time steps in model units.
+        u : pd.DataFrame, shape (nt, nu)
+            Exogenous inputs.
+        dtu : pd.DataFrame, shape (nt, nu)
+            Input time derivatives.
+        y : pd.DataFrame, shape (nt, ny)
+            Observations; NaN channels are omitted.
+        x0 : np.ndarray, shape (nx, 1), optional
+            Initial mean; defaults to ss.x0.
+        P0 : np.ndarray, shape (nx, nx), optional
+            Upper initial covariance factor; defaults to ss.P0.
 
         Returns
         -------
-        SmoothingResults
-            Result of the smoothing in the form of a namedtuple with the following
-            fields:
-
-            - x_update: np.ndarray[n_timesteps, nx, 1]
-                Updated state vector.
-            - P_update: np.ndarray[n_timesteps, nx, nx]
-                Updated covariance matrix.
-            - x_predict: np.ndarray[n_timesteps, nx, 1]
-                Predicted state vector.
-            - P_predict: np.ndarray[n_timesteps, nx, nx]
-                Predicted covariance matrix.
-            - x_smooth: np.ndarray[n_timesteps, nx, 1]
-                Smoothed state vector.
-            - P_smooth: np.ndarray[n_timesteps, nx, nx]
-                Smoothed covariance matrix.
-            - k: np.ndarray[n_timesteps, ny, 1]
-                Kalman gain.
-            - S: np.ndarray[n_timesteps, ny, ny]
-                Innovation covariance matrix.
-
+        KalmanResult
+            Smoothed means x and full covariances P; k and S remain the
+            filtering whitened residuals and upper innovation factors.
+            Shapes match filtering(). Refreshes model matrices and does not
+            modify input arrays.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=NumbaPerformanceWarning)
-            x0, P0, u, dtu, y, states = self._proxy_params(dt, (u, dtu, y), x0, P0)
+            x0, P0, u_array, dtu_array, y_array, states = self._proxy_params(
+                dt, (u, dtu, y), x0, P0
+            )
 
-            return _smoothing(x0, P0, u, dtu, y, states)
+            return _smoothing(x0, P0, u_array, dtu_array, y_array, states)
 
     def simulate(
         self,
@@ -585,33 +681,30 @@ class KalmanQR:
         dtu: pd.DataFrame,
         x0: np.ndarray | None = None,
         P0: np.ndarray | None = None,
+        *,
+        random_seed: int | None = None,
     ) -> SimulationResults:
-        """ Simulate the data using the state space model. The Kalman filter is not
-        involved in this process.
+        r"""Simulate states and outputs at the same observation times.
 
-        The formula reads:
-
-        .. math::
-            y = C x + D u + R \epsilon \\
-            x = A x + B_0 u + B_1 \dot{u} + Q \eta
-
-        where :math:`\epsilon` and :math:`\eta` are independent white noise with
-        covariance matrices :math:`R` and :math:`Q` respectively.
+        The initial state has covariance ``P0.T @ P0``. Measurement and process
+        noise have covariances ``R.T @ R`` and ``Q.T @ Q``, respectively.
+        The output is ``C @ x + D @ u`` plus measurement noise; the transition
+        occurs after recording the current state and output.
 
         Parameters
         ----------
         dt : pd.Series
             Time steps.
         u : pd.DataFrame
-            Output (or exogeneous) vector.
+            Exogenous inputs, shape (nt, nu).
         dtu : pd.DataFrame
-            Time derivative of the output vector.
+            Input time derivatives, shape (nt, nu).
         x0 : np.ndarray, optional
-            Initial state vector, by default None. If None, the initial state vector
-            provided by the statespace model is used.
+            Initial column mean (nx, 1); defaults to ss.x0.
         P0 : np.ndarray, optional
-            Initial covariance matrix, by default None. If None, the initial covariance
-            matrix provided by the statespace model is used.
+            Upper initial covariance factor (nx, nx); defaults to ss.P0.
+        random_seed : int, optional
+            Seed for reproducible simulation, including the initial state draw.
 
         Returns
         -------
@@ -626,8 +719,8 @@ class KalmanQR:
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=NumbaPerformanceWarning)
-            x0, _, u, dtu, states = self._proxy_params(dt, (u, dtu), x0, P0)
-            return _simulate(x0, u, dtu, states)
+            x0, P0, u_array, dtu_array, states = self._proxy_params(dt, (u, dtu), x0, P0)
+            return _simulate(x0, P0, u_array, dtu_array, states, random_seed)
 
     def estimate_output(
         self,
@@ -638,42 +731,33 @@ class KalmanQR:
         x0: np.ndarray | None = None,
         P0: np.ndarray | None = None,
     ) -> OutputEstimateResult:
-        """Estimate the output using the state space model and the Kalman filter.
+        """Return filtered output means and marginal standard deviations.
 
         Parameters
         ----------
-        dt : pd.Series
-            Time steps.
-        u : pd.DataFrame
-            Output (or exogeneous) vector.
-        dtu : pd.DataFrame
-            Time derivative of the output vector.
-        y : pd.DataFrame
-            Measurement (or observation) vector.
-        x0 : np.ndarray, optional
-            Initial state vector, by default None. If None, the initial state vector
-            provided by the statespace model is used.
-        P0 : np.ndarray, optional
-            Initial covariance matrix, by default None. If None, the initial covariance
-            matrix provided by the statespace model is used.
+        dt : pd.Series, shape (nt,)
+            Time steps in model units.
+        u : pd.DataFrame, shape (nt, nu)
+            Exogenous inputs.
+        dtu : pd.DataFrame, shape (nt, nu)
+            Input time derivatives.
+        y : pd.DataFrame, shape (nt, ny)
+            Observations; NaN channels are omitted.
+        x0 : np.ndarray, shape (nx, 1), optional
+            Initial mean; defaults to ss.x0.
+        P0 : np.ndarray, shape (nx, nx), optional
+            Upper initial covariance factor; defaults to ss.P0.
 
         Returns
         -------
-        OutputEstimate
-            Estimated output in the form of a namedtuple with the following fields:
-
-            - x: np.ndarray[n_timesteps, nx, 1]
-                State vector.
-            - P: np.ndarray[n_timesteps, nx, nx]
-                Covariance matrix.
-            - y: np.ndarray[n_timesteps, ny, 1]
-                Output vector.
-            - y_std: np.ndarray[n_timesteps, ny, 1]
-                Standard deviation of the output vector.
-
+        OutputEstimateResult
+            y and y_std, both ``(nt, ny, 1)``, include measurement noise in
+            the uncertainty. Refreshes model matrices without modifying inputs.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=NumbaPerformanceWarning)
-            x0, P0, u, dtu, y, states = self._proxy_params(dt, (u, dtu, y), x0, P0)
+            x0, P0, u_array, dtu_array, y_array, states = self._proxy_params(
+                dt, (u, dtu, y), x0, P0
+            )
 
-            return _estimate_output(x0, P0, u, dtu, y, states)
+            return _estimate_output(x0, P0, u_array, dtu_array, y_array, states)

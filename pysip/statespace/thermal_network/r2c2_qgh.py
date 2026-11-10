@@ -1,16 +1,21 @@
-from dataclasses import dataclass
+"""Two-capacity wall/indoor model with solar heat entering both nodes."""
 
+from dataclasses import dataclass
+from typing import cast
+
+from ...params import Parameters
 from ..base import RCModel
 
 
 @dataclass
 class R2C2Qgh(RCModel):
-    states = [
+    """Two-capacity wall/indoor model with solar heat entering both nodes."""
+    states = (
         ("TEMPERATURE", "xw", "wall temperature"),
         ("TEMPERATURE", "xi", "indoor space temperature"),
-    ]
+    )
 
-    params = [
+    params = (
         ("THERMAL_RESISTANCE", "Ro", "between the outdoor and the wall node"),
         ("THERMAL_RESISTANCE", "Ri", "between the wall node and the indoor"),
         ("THERMAL_CAPACITY", "Cw", "Wall"),
@@ -22,23 +27,22 @@ class R2C2Qgh(RCModel):
         ("INITIAL_MEAN", "x0_i", ""),
         ("INITIAL_DEVIATION", "sigx0_w", ""),
         ("INITIAL_DEVIATION", "sigx0_i", ""),
-    ]
+    )
 
-    inputs = [
+    inputs = (
         ("TEMPERATURE", "To", "outdoor air temperature"),
         ("POWER", "Qgh", "global horizontal solar radiation"),
         ("POWER", "Qh", "HVAC system heat"),
-    ]
+    )
 
-    outputs = [("TEMPERATURE", "xi", "indoor air temperature")]
+    outputs = (("TEMPERATURE", "xi", "indoor air temperature"),)
 
-    def __post_init__(self):
-        super().__post_init__()
-
-    def set_constant_continuous_ssm(self):
+    def set_constant_continuous_ssm(self) -> None:
+        """Mutate parameter-independent continuous matrices in place."""
         self.C[0, 1] = 1.0
 
-    def update_continuous_ssm(self):
+    def update_continuous_ssm(self) -> None:
+        """Mutate continuous matrices and initial moments from physical parameters."""
         (
             Ro,
             Ri,
@@ -52,7 +56,7 @@ class R2C2Qgh(RCModel):
             sigx0_w,
             sigx0_i,
             *_,
-        ) = self.parameters.theta
+        ) = cast(Parameters, self.parameters).theta
 
         self.A[:] = [
             [-(Ro + Ri) / (Cw * Ri * Ro), 1.0 / (Cw * Ri)],
