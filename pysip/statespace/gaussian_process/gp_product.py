@@ -9,7 +9,7 @@ import numpy as np
 
 from ...params import Parameters
 from ...utils.math import nearest_cholesky
-from .._functional import ContinuousMatrices, apply_covariances, model_covariances
+from .._functional import ContinuousMatrices
 from ..base import GPModel, Node, Par
 
 
@@ -145,14 +145,6 @@ class GPProduct(GPModel):
         q = xp.kron(q1, p2) + xp.kron(a1 @ p1 @ a1.T, q2)
         b = xp.zeros((a.shape[0], 0))
         return a, b, b, q
-
-    def update_continuous_ssm(self) -> None:
-        """Refresh child realizations and factor the shared product covariance law."""
-        self._gp1.update_continuous_ssm()
-        self._gp2.update_continuous_ssm()
-        apply_covariances(self, self._combine_continuous(
-            model_covariances(self._gp1), model_covariances(self._gp2)
-        ))
 
     def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
         """Evaluate the product covariance realization without mutating either child.

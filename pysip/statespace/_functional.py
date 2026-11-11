@@ -1,7 +1,5 @@
 """Shared model equations evaluated with NumPy or optional immutable JAX arrays."""
 
-from copy import copy
-from types import SimpleNamespace
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -59,14 +57,6 @@ def block_diag(*arrays: Any, xp: Any = np) -> Any:
     return result
 
 
-def model_covariances(model: Any) -> ContinuousMatrices:
-    """Read current model matrices, converting upper factors to covariances."""
-    return ContinuousMatrices(
-        model.A, model.B, model.C, model.D, model.Q.T @ model.Q,
-        model.R.T @ model.R, model.x0, model.P0.T @ model.P0,
-    )
-
-
 def apply_covariances(model: Any, matrices: ContinuousMatrices) -> None:
     """Write host matrices and upper covariance factors to a mutable model."""
     model.A, model.B, model.C, model.D = matrices[:4]
@@ -74,22 +64,6 @@ def apply_covariances(model: Any, matrices: ContinuousMatrices) -> None:
     model.R = nearest_cholesky(np.asarray(matrices.Rc))
     model.x0 = matrices.x0
     model.P0 = nearest_cholesky(np.asarray(matrices.P0c))
-
-
-def evaluate_matrices(model: Any, theta: Any, xp: Any = np) -> ContinuousMatrices:
-    """Evaluate a leaf's existing update equations on an independent matrix view.
-
-    The view exposes physical parameters through ``parameters.theta``. Custom
-    models using immutable array assignment can reuse this implementation;
-    others can implement ``continuous_matrices`` directly. Original arrays and
-    parameter objects are never modified, including when xp is NumPy.
-    """
-    view = copy(model)
-    view.parameters = SimpleNamespace(theta=theta)
-    for name in ("A", "B", "C", "D", "Q", "R", "x0", "P0"):
-        setattr(view, name, xp.asarray(np.array(getattr(model, name), copy=True)))
-    view.update_continuous_ssm()
-    return model_covariances(view)
 
 
 def matrix_exponential(array: Any, xp: Any = np) -> Any:

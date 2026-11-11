@@ -19,6 +19,7 @@ nav = [
   { "User guide" = [
     { "Quickstart" = "content/quickstart.md" },
     { "Advanced usage" = "content/advanced.md" },
+    { "PyMC JAX sampling" = "content/jax-sampling.md" },
   ] },
   { "Cookbook" = [
     { "Overview" = "cookbook.md" },

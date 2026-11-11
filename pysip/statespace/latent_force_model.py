@@ -7,13 +7,7 @@ from typing import Any, cast
 import numpy as np
 
 from ..params import Parameters
-from ._functional import (
-    ContinuousMatrices,
-    apply_covariances,
-    array_set,
-    block_diag,
-    model_covariances,
-)
+from ._functional import ContinuousMatrices, block_diag
 from .base import GPModel, Node, Par, RCModel, StateSpace
 
 
@@ -138,8 +132,10 @@ class LatentForceModel(StateSpace):
             Augmented realization retaining only nonlatent external inputs.
         """
         nr, ng = rc.A.shape[0], gp.A.shape[0]
-        a = block_diag(rc.A, gp.A, xp=xp)
-        a = array_set(a, (slice(None, nr), slice(nr, None)), rc.B[:, self.idx] @ gp.C)
+        a = xp.concatenate((
+            xp.concatenate((rc.A, rc.B[:, self.idx] @ gp.C), axis=1),
+            xp.concatenate((xp.zeros((ng, nr)), gp.A), axis=1),
+        ), axis=0)
         b = xp.concatenate((rc.B[:, ~self.idx], xp.zeros((ng, self.nu))), axis=0)
         c = xp.concatenate((rc.C, rc.D[:, self.idx] @ gp.C), axis=1)
         return ContinuousMatrices(
@@ -148,14 +144,6 @@ class LatentForceModel(StateSpace):
             xp.concatenate((rc.x0, gp.x0), axis=0),
             block_diag(rc.P0c, gp.P0c, xp=xp),
         )
-
-    def update_continuous_ssm(self) -> None:
-        """Refresh children and factor the shared augmented covariance realization."""
-        self._rc.update_continuous_ssm()
-        self._gp.update_continuous_ssm()
-        apply_covariances(self, self._combine_continuous(
-            model_covariances(self._rc), model_covariances(self._gp)
-        ))
 
     def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
         """Evaluate the augmented covariance realization without mutating children.
@@ -226,10 +214,23 @@ class R2C2_Qgh_Matern32(RCModel):
 
     def set_constant_continuous_ssm(self) -> None:
         """Mutate parameter-independent continuous matrices in place."""
-        self.C = array_set(self.C, (0, 1), 1.0)
+        self.C[0, 1] = 1.0
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Return coupled thermal/Matérn dynamics and full covariances.
+
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy or JAX NumPy array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Coupled dynamics, configured observations, initial mean/covariances.
+        """
         (
             Ro,
             Ri,
@@ -245,21 +246,27 @@ class R2C2_Qgh_Matern32(RCModel):
             mscale,
             lscale,
             *_,
-        ) = cast(Parameters, self.parameters).theta
+        ) = theta
 
-        self.A = array_set(self.A, slice(None), [
+        a = xp.asarray([
             [-(Ro + Ri) / (Cw * Ri * Ro), 1.0 / (Cw * Ri), 1.0 / Cw, 0.0],
             [1.0 / (Ci * Ri), -1.0 / (Ci * Ri), 1.0 / Ci, 0.0],
             [0.0, 0.0, 0.0, 1.0],
             [0.0, 0.0, -3.0 / lscale**2, -2.0 * 3.0**0.5 / lscale],
         ])
-        self.B = array_set(self.B, (slice(None, 2), slice(None)), [[1.0 / (Cw * Ro), 0.0], [0.0, 1.0 / Ci]])
-        self.Q = array_set(self.Q, self._diag, [
-            sigw_w,
-            sigw_i,
-            0.0,
-            2.0 * 3.0**0.75 * mscale / lscale**1.5,
+        b = xp.asarray([
+            [1.0 / (Cw * Ro), 0.0], [0.0, 1.0 / Ci],
+            [0.0, 0.0], [0.0, 0.0],
         ])
-        self.R = array_set(self.R, (0, 0), sigv)
-        self.x0 = array_set(self.x0, (slice(None, 2), 0), [x0_w, x0_i])
-        self.P0 = array_set(self.P0, self._diag, [sigx0_w, sigx0_i, mscale, 3.0**0.5 * mscale / lscale])
+        qc = xp.diag(xp.asarray([
+            sigw_w**2, sigw_i**2, 0.0,
+            4.0 * 3.0**1.5 * mscale**2 / lscale**3,
+        ]))
+        p0 = xp.diag(xp.asarray([
+            sigx0_w**2, sigx0_i**2, mscale**2, 3.0 * mscale**2 / lscale**2,
+        ]))
+        x0 = xp.concatenate((xp.asarray([[x0_w], [x0_i]]), xp.asarray(self.x0[2:])), axis=0)
+        return ContinuousMatrices(
+            a, b, xp.asarray(self.C), xp.asarray(self.D), qc,
+            xp.asarray([[sigv**2]]), x0, p0,
+        )

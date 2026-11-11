@@ -101,6 +101,12 @@ transforms must be differentiable; see the [advanced guide](docs/content/advance
 Each fit compiles an objective for its model and data, then reuses it throughout
 optimization. GPU execution is not enabled.
 
+Model equations have one canonical definition:
+`continuous_matrices(theta, *, xp=np) -> ContinuousMatrices`.
+Both backends evaluate it directly; the mutable update hook is a NumPy adapter.
+Custom models must migrate old mutable equations to this interface.
+See [PyMC JAX sampling](docs/content/jax-sampling.md) for posterior sampling.
+
 ## IMPORTANT - Migration to v1.0.0
 
 The version 1.0.0 of pySIP is a major update of the library. It focused on

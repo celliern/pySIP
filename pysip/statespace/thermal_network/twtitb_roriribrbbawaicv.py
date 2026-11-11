@@ -1,10 +1,11 @@
 """Envelope/indoor/boundary-wall network with distinct Rib and Rbb links, solar, and ventilation heat."""
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Any
 
-from ...params import Parameters
-from .._functional import array_set
+import numpy as np
+
+from .._functional import ContinuousMatrices
 from ..base import RCModel
 
 
@@ -59,8 +60,23 @@ class TwTiTb_RoRiRibRbbAwAicv(RCModel):
         """Mutate parameter-independent continuous matrices in place."""
         self.C[0, 1] = 1.0
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
+    def continuous_matrices(
+        self, theta: Any, *, xp: Any = np
+    ) -> ContinuousMatrices:
+        """Return continuous matrices and full covariances without mutation.
+
+        Parameters
+        ----------
+        theta : array_like
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy-compatible array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            System matrices, full covariances, and initial mean.
+        """
         (
             Ro,
             Ri,
@@ -83,19 +99,25 @@ class TwTiTb_RoRiRibRbbAwAicv(RCModel):
             sigx0_i,
             sigx0_b,
             *_,
-        ) = cast(Parameters, self.parameters).theta
+        ) = theta
 
-        self.A = array_set(self.A, slice(None), [
+        A_matrix = xp.array([
             [-(Ro + Ri) / (Cw * Ri * Ro), 1.0 / (Cw * Ri), 0.0],
             [1.0 / (Ci * Ri), -(Ri + Rib) / (Ci * Ri * Rib), 1.0 / (Ci * Rib)],
             [0.0, 1.0 / (Cb * Rib), -(Rib + Rbb) / (Cb * Rib * Rbb)],
         ])
-        self.B = array_set(self.B, slice(None), [
+        B_matrix = xp.array([
             [1.0 / (Cw * Ro), 0.0, Aw / Cw, 0.0, 0.0],
             [0.0, 0.0, Ai / Ci, 1.0 / Ci, cv / Ci],
             [0.0, 1.0 / (Cb * Rbb), 0.0, 0.0, 0.0],
         ])
-        self.Q = array_set(self.Q, self._diag, [sigw_w, sigw_i, sigw_b])
-        self.R = array_set(self.R, (0, 0), sigv)
-        self.x0 = array_set(self.x0, (slice(None), 0), [x0_w, x0_i, x0_b])
-        self.P0 = array_set(self.P0, self._diag, [sigx0_w, sigx0_i, sigx0_b])
+        return ContinuousMatrices(
+            A=A_matrix,
+            B=B_matrix,
+            C=xp.asarray(self.C),
+            D=xp.asarray(self.D),
+            Qc=xp.diag(xp.array([sigw_w ** 2, sigw_i ** 2, sigw_b ** 2])),
+            Rc=xp.array([[sigv ** 2]]),
+            x0=xp.array([x0_w, x0_i, x0_b])[:, None],
+            P0c=xp.diag(xp.array([sigx0_w ** 2, sigx0_i ** 2, sigx0_b ** 2])),
+        )

@@ -1,14 +1,13 @@
 """Finite harmonic approximation of the periodic covariance kernel."""
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 
-from ...params import Parameters
-from .._functional import array_namespace, array_set
+from .._functional import ContinuousMatrices
 from ..base import GPModel
-from ._bessel import periodic_scales
+from ._bessel import periodic_variances
 
 
 @dataclass
@@ -53,21 +52,35 @@ class Periodic(GPModel):
 
     def set_constant_continuous_ssm(self) -> None:
         """Mutate parameter-independent continuous matrices in place."""
-        self.C = array_set(self.C, (0, slice(None, None, 2)), 1.0)
+        self.C[0, ::2] = 1.0
         self._kron = np.kron(
             np.diag(range(self.J + 1)),
             np.array([[0.0, -2.0 * np.pi], [2.0 * np.pi, 0.0]]),
         )
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
-        period, mscale, lscale, sigv, *_ = cast(Parameters, self.parameters).theta
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Return harmonic dynamics and full spectral covariances.
 
-        xp = array_namespace(self.A)
-        scales = periodic_scales(mscale, lscale, self.J, xp=xp)
-        self.A = array_set(self.A, slice(None), self._kron / period)
-        self.R = array_set(self.R, (0, 0), sigv)
-        self.P0 = array_set(self.P0, self._diag, xp.repeat(scales, 2))
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy or JAX NumPy array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Harmonic generator, configured observations/mean, and covariances.
+        """
+        period, mscale, lscale, sigv, *_ = theta
+        variances = periodic_variances(mscale, lscale, self.J, xp=xp)
+        return ContinuousMatrices(
+            xp.asarray(self._kron) / period, xp.zeros((self.nx, 0)),
+            xp.asarray(self.C), xp.asarray(self.D),
+            xp.zeros((self.nx, self.nx)), xp.asarray([[sigv**2]]),
+            xp.asarray(self.x0), xp.diag(xp.repeat(variances, 2)),
+        )
 
     def _discrete_rotation(self, A: Any, dt: Any, *, xp: Any = np) -> tuple[Any, Any, Any, Any]:
         """Return harmonic rotations and exactly zero input/noise increments.

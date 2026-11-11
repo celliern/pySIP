@@ -25,7 +25,7 @@ from ..utils.misc import Namespace
 from . import discretization
 from ._functional import (
     ContinuousMatrices,
-    evaluate_matrices,
+    apply_covariances,
 )
 from ._functional import (
     discrete_covariance as _discrete_covariance,
@@ -416,7 +416,18 @@ Parameters:
         """Mutate parameter-independent continuous matrices; base hook does nothing."""
 
     def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices from physical parameters; base hook does nothing."""
+        """Adapt the canonical definition to mutable NumPy matrices and factors.
+
+        Nested models are refreshed as well so reference discretization and
+        callers inspecting child state see the same physical parameters.
+        Model equations belong exclusively in ``continuous_matrices``.
+        """
+        for child in vars(self).values():
+            if isinstance(child, StateSpace):
+                child.update_continuous_ssm()
+        apply_covariances(
+            self, self.continuous_matrices(cast(Parameters, self.parameters).theta)
+        )
 
     def update(self) -> None:
         """Mutate continuous matrices and initial moments from physical parameters."""
@@ -430,8 +441,9 @@ Parameters:
         theta : array_like
             All physical parameters, including fixed leaves, in flattened order.
         xp : module, optional
-            NumPy or jax.numpy. Custom JAX models must use immutable array updates
-            or override this method with a pure definition.
+            Array namespace used for every parameter-dependent operation.
+            Implement this method once using NumPy-compatible array operations;
+            both SciPy inference and JAX differentiation consume its result.
 
         Returns
         -------
@@ -439,15 +451,9 @@ Parameters:
             A/B/C/D, full diffusion and measurement covariances, initial column
             mean, and full initial covariance. Covariances are not factors.
         """
-        try:
-            return evaluate_matrices(self, theta, xp)
-        except (TypeError, ValueError) as error:
-            if xp is np:
-                raise
-            raise TypeError(
-                f"{type(self).__name__} cannot evaluate immutable model matrices; "
-                "use array_set for indexed updates or implement continuous_matrices"
-            ) from error
+        raise NotImplementedError(
+            f"{type(self).__name__} must define continuous_matrices(theta, *, xp=np)"
+        )
 
     def discrete_covariance(
         self, theta: Any, dt: Any, *, xp: Any = np,

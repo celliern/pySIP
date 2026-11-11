@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import cached_property
 from multiprocessing import cpu_count
 from typing import Any, Literal, cast
 
@@ -15,7 +17,7 @@ import pymc as pm
 import pytensor.tensor as pt
 import xarray as xr
 from pytensor.graph.basic import Apply, Variable
-from pytensor.graph.op import Op
+from pytensor.link.jax.ops import JAXOp
 from pytensor.tensor.variable import TensorVariable
 from scipy.optimize import OptimizeResult, approx_fprime, minimize
 
@@ -25,7 +27,28 @@ from .statespace_estimator import KalmanQR, output_moments
 from .utils.statistics import ttest
 
 
-class _FdiffLoglikeGrad(Op):
+class _JAXLikelihoodOp(JAXOp):
+    """Use PyTensor's lazy JAXOp dispatch while retaining native execution."""
+
+    __props__ = ()
+    # Each operation captures different data/model snapshots; never merge by type.
+    __eq__ = object.__eq__
+    __hash__ = object.__hash__
+    input_types = (pt.dvector,)
+    output_types = (pt.dvector,)
+    name = None
+    estimator: KalmanQR
+    data: tuple[pd.Series, pd.DataFrame, pd.DataFrame, pd.DataFrame]
+
+    @cached_property
+    def _jax_nll(self) -> Callable[[Any], Any]:
+        """Cache the snapshotted likelihood only when JAX compilation needs it."""
+        from ._pymc_jax import make_loglike
+
+        return make_loglike(self.estimator, self.data)
+
+
+class _FdiffLoglikeGrad(_JAXLikelihoodOp):
     """Finite-difference negative-likelihood gradient in standardized coordinates."""
 
     itypes = (pt.dvector,)
@@ -35,12 +58,12 @@ class _FdiffLoglikeGrad(Op):
         self, reg: Regressor, df: pd.DataFrame, eps: float | np.ndarray | None = None,
     ) -> None:
         """Capture prepared data and the estimator used by the numerical gradient."""
-        self.estimator = reg.estimator
+        self.estimator = deepcopy(reg.estimator)
         self.data = reg.prepare_data(df)
         self.eps = eps
 
     def perform(
-        self, node: Apply, inputs: Sequence[np.ndarray], output_storage: list[list[Any]],
+        self, node: Apply, inputs: Sequence[np.ndarray], outputs: list[list[Any]],
     ) -> None:
         """Write the gradient into PyTensor's mutable output storage."""
         def _target(eta: np.ndarray) -> float:
@@ -53,26 +76,34 @@ class _FdiffLoglikeGrad(Op):
         (eta,) = inputs  # this will contain my variables
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            output_storage[0][0] = approx_fprime(eta, _target, self.eps)
+            outputs[0][0] = approx_fprime(eta, _target, self.eps)
+
+    def perform_jax(self, *inputs: Any) -> Any:
+        """Translate the symbolic native gradient into exact JAX autodiff."""
+        import jax
+
+        (standardized,) = inputs
+        return jax.grad(self._jax_nll)(standardized)
 
 
-class _Loglike(Op):
+class _Loglike(_JAXLikelihoodOp):
     """PyTensor scalar negative likelihood for standardized free parameters."""
 
     itypes = (pt.dvector,)
     otypes = (pt.dscalar,)
+    output_types = (pt.dscalar,)
 
     def __init__(
         self, reg: Regressor, df: pd.DataFrame, eps: float | np.ndarray | None = None,
     ) -> None:
         """Capture data and construct the finite-difference gradient operation."""
-        self.estimator = reg.estimator
+        self.estimator = deepcopy(reg.estimator)
         self.data = reg.prepare_data(df)
         self.eps = eps
         self.logpgrad = _FdiffLoglikeGrad(reg, df, eps)
 
     def perform(
-        self, node: Apply, inputs: Sequence[np.ndarray], output_storage: list[list[Any]],
+        self, node: Apply, inputs: Sequence[np.ndarray], outputs: list[list[Any]],
     ) -> None:
         """Write scalar negative likelihood into PyTensor's dynamic storage."""
         estimator = deepcopy(self.estimator)
@@ -82,18 +113,23 @@ class _Loglike(Op):
             # StateSpace.__post_init__ always initializes its parameter collection.
             cast(Parameters, estimator.ss.parameters).theta_sd = eta
             logl = estimator.log_likelihood(*self.data)
-        output_storage[0][0] = np.array(logl)
+        outputs[0][0] = np.array(logl)
+
+    def perform_jax(self, *inputs: Any) -> Any:
+        """Lower directly to the pure covariance scan, never native perform."""
+        (standardized,) = inputs
+        return self._jax_nll(standardized)
 
     def pullback(
         self, inputs: Sequence[Variable], outputs: Sequence[Variable],
-        cotangents: Sequence[Variable],
+        output_gradients: Sequence[Variable],
     ) -> list[Variable]:
         """Multiply tensor cotangents by the numerical parameter gradient.
 
         The declared input/output tensor types guarantee tensor variables here.
         """
         (eta,) = inputs
-        cotangent = cast(TensorVariable, cotangents[0])
+        cotangent = cast(TensorVariable, output_gradients[0])
         gradient = cast(TensorVariable, self.logpgrad(eta))
         return [cotangent * gradient]
 
@@ -616,7 +652,12 @@ class Regressor:
         documentation for more details.
         """
         cores = min(kwargs.pop("cores", cpu_count()), chains)
-        with self.pymc_model(df):
+        context: Any = nullcontext()
+        if kwargs.get("nuts_sampler") in ("numpyro", "blackjax"):
+            from ._pymc_jax import sampling_context
+
+            context = sampling_context()
+        with context, self.pymc_model(df):
             self._trace = pm.sample(
                 draws=draws, tune=tune, chains=chains, cores=cores, **kwargs
             )

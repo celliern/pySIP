@@ -5,7 +5,7 @@ from inspect import isclass
 from pathlib import Path
 from pkgutil import iter_modules
 
-from ._functional import ContinuousMatrices, array_namespace, array_set
+from ._functional import ContinuousMatrices
 from .base import StateSpace, model_registry
 from .gaussian_process import (
     GPProduct,
@@ -91,8 +91,6 @@ __all__ = [
     "TwTi_RoRiAwAicv",
     "TwTi_RoRiRbAwAi",
     "TwTi_RoRiRbAwAicv",
-    "array_namespace",
-    "array_set",
     "gaussian_process",
     "thermal_network",
 ]

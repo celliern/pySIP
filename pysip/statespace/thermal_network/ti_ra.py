@@ -1,10 +1,11 @@
 """Single indoor capacity linked to outdoors, with solar and HVAC heat gains."""
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Any
 
-from ...params import Parameters
-from .._functional import array_set
+import numpy as np
+
+from .._functional import ContinuousMatrices
 from ..base import RCModel
 
 
@@ -35,13 +36,38 @@ class Ti_RA(RCModel):
         """Mutate parameter-independent continuous matrices in place."""
         self.C[0, 0] = 1.0
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
-        R, C, A, sigw, sigv, x0, sigx0, *_ = cast(Parameters, self.parameters).theta
+    def continuous_matrices(
+        self, theta: Any, *, xp: Any = np
+    ) -> ContinuousMatrices:
+        """Return continuous matrices and full covariances without mutation.
 
-        self.A = array_set(self.A, (0, 0), -1.0 / (C * R))
-        self.B = array_set(self.B, (0, slice(None)), [1.0 / (C * R), A / C, 1.0 / C])
-        self.Q = array_set(self.Q, (0, 0), sigw)
-        self.R = array_set(self.R, (0, 0), sigv)
-        self.x0 = array_set(self.x0, (0, 0), x0)
-        self.P0 = array_set(self.P0, (0, 0), sigx0)
+        Parameters
+        ----------
+        theta : array_like
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy-compatible array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            System matrices, full covariances, and initial mean.
+        """
+        R, C, A, sigw, sigv, x0, sigx0, *_ = theta
+
+        A_matrix = xp.array([
+            [-1.0 / (C * R)],
+        ])
+        B_matrix = xp.array([
+            [1.0 / (C * R), A / C, 1.0 / C],
+        ])
+        return ContinuousMatrices(
+            A=A_matrix,
+            B=B_matrix,
+            C=xp.asarray(self.C),
+            D=xp.asarray(self.D),
+            Qc=xp.diag(xp.array([sigw ** 2])),
+            Rc=xp.array([[sigv ** 2]]),
+            x0=xp.array([x0])[:, None],
+            P0c=xp.diag(xp.array([sigx0 ** 2])),
+        )

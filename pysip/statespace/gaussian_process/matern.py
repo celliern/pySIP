@@ -1,10 +1,11 @@
 """Matérn kernels with magnitude expressed as a standard deviation."""
 
 from dataclasses import dataclass
-from typing import cast
+from typing import Any
 
-from ...params import Parameters
-from .._functional import array_set
+import numpy as np
+
+from .._functional import ContinuousMatrices
 from ..base import GPModel
 
 
@@ -25,17 +26,32 @@ class Matern12(GPModel):
     outputs = (("ANY", "f(t)", "stochastic process"),)
 
     def set_constant_continuous_ssm(self) -> None:
-        """Mutate parameter-independent continuous matrices in place."""
-        self.C = array_set(self.C, (0, 0), 1.0)
+        """Initialize the fixed observation matrix."""
+        self.C[0, 0] = 1.0
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
-        mscale, lscale, sigv, *_ = cast(Parameters, self.parameters).theta
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Return the continuous realization and full covariances.
 
-        self.A = array_set(self.A, slice(None), -1.0 / lscale)
-        self.Q = array_set(self.Q, slice(None), 2.0**0.5 * mscale / lscale**0.5)
-        self.R = array_set(self.R, slice(None), sigv)
-        self.P0 = array_set(self.P0, slice(None), mscale)
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy or JAX NumPy array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Dynamics, configured observations/mean, and full covariances.
+        """
+        mscale, lscale, sigv, *_ = theta
+        variance = mscale**2
+        return ContinuousMatrices(
+            xp.asarray([[-1.0 / lscale]]), xp.zeros((1, 0)),
+            xp.asarray(self.C), xp.asarray(self.D),
+            xp.asarray([[2.0 * variance / lscale]]), xp.asarray([[sigv**2]]),
+            xp.asarray(self.x0), xp.asarray([[variance]]),
+        )
 
 
 @dataclass
@@ -58,20 +74,33 @@ class Matern32(GPModel):
     outputs = (("ANY", "f(t)", "stochastic process"),)
 
     def set_constant_continuous_ssm(self) -> None:
-        """Mutate parameter-independent continuous matrices in place."""
-        self.A = array_set(self.A, (0, 1), 1.0)
-        self.C = array_set(self.C, (0, 0), 1.0)
+        """Initialize the fixed observation matrix."""
+        self.C[0, 0] = 1.0
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
-        mscale, lscale, sigv, *_ = cast(Parameters, self.parameters).theta
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Return the continuous realization and full covariances.
 
-        self.A = array_set(
-            self.A, (1, slice(None)), [-3.0 / lscale**2, -2.0 * 3.0**0.5 / lscale]
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy or JAX NumPy array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Dynamics, configured observations/mean, and full covariances.
+        """
+        mscale, lscale, sigv, *_ = theta
+        variance = mscale**2
+        return ContinuousMatrices(
+            xp.asarray([[0.0, 1.0], [-3.0 / lscale**2, -2.0 * 3.0**0.5 / lscale]]),
+            xp.zeros((2, 0)), xp.asarray(self.C), xp.asarray(self.D),
+            xp.diag(xp.asarray([0.0, 4.0 * 3.0**1.5 * variance / lscale**3])),
+            xp.asarray([[sigv**2]]), xp.asarray(self.x0),
+            xp.diag(xp.asarray([variance, 3.0 * variance / lscale**2])),
         )
-        self.Q = array_set(self.Q, (1, 1), 2.0 * 3.0**0.75 * mscale / lscale**1.5)
-        self.R = array_set(self.R, (0, 0), sigv)
-        self.P0 = array_set(self.P0, self._diag, [mscale, 3.0**0.5 * mscale / lscale])
 
 
 @dataclass
@@ -95,27 +124,38 @@ class Matern52(GPModel):
     outputs = (("ANY", "f(t)", "stochastic process"),)
 
     def set_constant_continuous_ssm(self) -> None:
-        """Mutate parameter-independent continuous matrices in place."""
-        self.A = array_set(self.A, (0, 1), 1.0)
-        self.A = array_set(self.A, (1, 2), 1.0)
-        self.C = array_set(self.C, (0, 0), 1.0)
+        """Initialize the fixed observation matrix."""
+        self.C[0, 0] = 1.0
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
-        mscale, lscale, sigv, *_ = cast(Parameters, self.parameters).theta
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Return the continuous realization and full covariances.
 
-        self.A = array_set(self.A, (2, slice(None)), [
-            -(5.0**1.5) / lscale**3,
-            -15.0 / lscale**2,
-            -3.0 * 5.0**0.5 / lscale,
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy or JAX NumPy array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Dynamics, configured observations/mean, and full covariances.
+        """
+        mscale, lscale, sigv, *_ = theta
+        variance = mscale**2
+        a = xp.asarray([
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [-5.0**1.5 / lscale**3, -15.0 / lscale**2, -3.0 * 5.0**0.5 / lscale],
         ])
-        self.Q = array_set(
-            self.Q, (2, 2), 20.0 * 5.0**0.25 / 3.0**0.5 * mscale / lscale**2.5
+        p0 = variance * xp.asarray([
+            [1.0, 0.0, -5.0 / (3.0 * lscale**2)],
+            [0.0, 5.0 / (3.0 * lscale**2), 0.0],
+            [-5.0 / (3.0 * lscale**2), 0.0, 25.0 / lscale**4],
+        ])
+        return ContinuousMatrices(
+            a, xp.zeros((3, 0)), xp.asarray(self.C), xp.asarray(self.D),
+            xp.diag(xp.asarray([0.0, 0.0, 400.0 * 5.0**0.5 * variance / (3.0 * lscale**5)])),
+            xp.asarray([[sigv**2]]), xp.asarray(self.x0), p0,
         )
-        self.R = array_set(self.R, (0, 0), sigv)
-        # Upper triangular Cholesky factor
-        self.P0 = array_set(self.P0, slice(None), [
-            [mscale, 0.0, -5.0 * mscale / (3.0 * lscale**2)],
-            [0, 15**0.5 * mscale / (3.0 * lscale), 0.0],
-            [0.0, 0.0, 10 * 2**0.5 * mscale / (3.0 * lscale**2)],
-        ])

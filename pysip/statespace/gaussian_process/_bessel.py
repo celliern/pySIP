@@ -109,15 +109,3 @@ def periodic_variances(mscale: Any, lscale: Any, degree: int, *, xp: Any = np) -
     if xp is np and not np.all(np.isfinite(variances)):
         raise ValueError("Spectral variance coefficients are not finite!")
     return variances
-
-
-def periodic_scales(mscale: Any, lscale: Any, degree: int, *, xp: Any = np) -> Any:
-    """Return spectral factors with finite tangents at zero overall amplitude.
-
-    Pulling the amplitude outside the square root avoids the undefined
-    ``sqrt(mscale**2)`` derivative at zero. Underflowed harmonics remain zero.
-    Squared factors equal ``periodic_variances`` without changing covariance.
-    """
-    weights = periodic_variances(1.0, lscale, degree, xp=xp)
-    root = xp.sqrt(xp.where(weights > 0.0, weights, 1.0))
-    return xp.abs(mscale) * xp.where(weights > 0.0, root, 0.0)

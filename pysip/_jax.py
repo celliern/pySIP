@@ -15,36 +15,16 @@ from .regressors import Regressor
 from .statespace.base import GPModel, RCModel, StateSpace
 
 
-def make_objective(
-    reg: Regressor,
+def make_likelihood(
+    ss: StateSpace,
     data: tuple[pd.Series, pd.DataFrame, pd.DataFrame, pd.DataFrame],
-) -> Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]]:
-    """Build and initially validate a CPU float64 posterior value/gradient pair.
+) -> Callable[[Any], tuple[Any, Any]]:
+    """Snapshot a model/data pair and return pure JAX NLL in physical coordinates.
 
-    Parameters
-    ----------
-    reg : Regressor
-        Source model and parameter collection, snapshotted without mutation.
-    data : tuple
-        Prepared ``dt, u, dtu, y`` from ``reg.prepare_data``. Individual NaN
-        output channels are marginalized; trailing missing rows are omitted.
-
-    Returns
-    -------
-    callable
-        Function of free unconstrained eta returning a Python float and NumPy
-        gradient, suitable for ``scipy.optimize.minimize(..., jac=True)``.
-        Compilation and initial numerical validation occur before returning.
-
-    Raises
-    ------
-    ImportError
-        If the optional JAX dependency is unavailable.
-    TypeError
-        If model operations cannot be traced by JAX.
-    ValueError
-        If innovations are not finite positive definite, or the objective or
-        its gradient is nonfinite. No jitter or covariance clipping is applied.
+    The second result is the first invalid innovation row, or -1. Both Bayesian
+    lowering and frequentist fitting consume this covariance scan; no priors,
+    coordinate transforms, penalties or Jacobians belong here. JAX is imported
+    only on demand. Construction and execution require CPU/float64 contexts.
     """
     try:
         import jax
@@ -55,8 +35,7 @@ def make_objective(
             "JAX fitting requires the optional extra: pip install 'pysip[jax]'"
         ) from error
 
-    enable_x64 = jax.enable_x64
-    model = deepcopy(reg.ss)
+    model = deepcopy(ss)
 
     def validate_discretization(instance: StateSpace) -> None:
         """Never ignore a custom legacy discretization, including nested models."""
@@ -73,9 +52,6 @@ def make_objective(
                 validate_discretization(value)
 
     validate_discretization(model)
-    parameters = cast("Parameters", model.parameters)
-    leaves = parameters.parameters
-    eta0 = np.asarray(parameters.eta_free, dtype=np.float64).copy()
     dt, u, dtu, y = data
     observations = np.asarray(y, dtype=np.float64)
     observed = ~np.isnan(observations)
@@ -87,39 +63,20 @@ def make_objective(
     )
     selected = np.zeros(n, dtype=np.int64)
     selected[: max(n - 1, 0)] = indices[: max(n - 1, 0)]
-    cpu = jax.devices("cpu")[0]
+    # Keep captured data on the host: this factory can run during an outer
+    # PyMC trace, where caching jnp.asarray results would leak JAX tracers.
+    inputs = np.array(u, dtype=np.float64, copy=True)[:n]
+    derivatives = np.array(dtu, dtype=np.float64, copy=True)[:n]
+    outputs = np.where(observed[:n], observations[:n], 0.0)
+    masks = observed[:n]
+    time_values = times
+    time_indices = selected
+    row_indices = np.arange(n)
 
-    with enable_x64(), jax.default_device(cpu):
-        inputs = jnp.asarray(np.asarray(u, dtype=np.float64)[:n])
-        derivatives = jnp.asarray(np.asarray(dtu, dtype=np.float64)[:n])
-        outputs = jnp.asarray(np.where(observed[:n], observations[:n], 0.0))
-        masks = jnp.asarray(observed[:n])
-        time_values = jnp.asarray(times)
-        time_indices = jnp.asarray(selected)
-        row_indices = jnp.arange(n)
-
-    def objective(eta: Any) -> tuple[Any, Any]:
-        """Evaluate the full differentiable negative posterior and bad-row index."""
-        physical = []
-        offset = jnp.asarray(0.0)
-        free_index = 0
-        for parameter in leaves:
-            if parameter.free:
-                standardized = parameter._transform.untransform(
-                    eta[free_index], xp=jnp,
-                )
-                free_index += 1
-                offset = offset + 1e-4 * parameter._transform.penalty(
-                    standardized, xp=jnp,
-                )
-                if parameter.prior is not None:
-                    offset = offset - parameter.prior.jax_logpdf(standardized)
-            else:
-                standardized = jnp.asarray(parameter.theta_sd)
-            physical.append(parameter.loc + parameter.scale * standardized)
-        theta = jnp.stack(physical) if physical else jnp.empty((0,))
+    def likelihood(theta: Any) -> tuple[Any, Any]:
+        """Evaluate negative likelihood and identify nonpositive innovations."""
         if not n:
-            return offset, jnp.asarray(-1)
+            return jnp.asarray(0.0, dtype=theta.dtype), jnp.asarray(-1)
 
         matrices = model.continuous_matrices(theta, xp=jnp)
         initial_covariance = jnp.asarray(matrices.P0c)
@@ -181,10 +138,54 @@ def make_objective(
 
         (_, _, value, bad_row), _ = jax.lax.scan(
             step,
-            (x0, p0, offset, jnp.asarray(-1)),
+            (x0, p0, jnp.asarray(0.0, dtype=theta.dtype), jnp.asarray(-1)),
             (time_indices, inputs, derivatives, outputs, masks, row_indices),
         )
         return value, bad_row
+
+    return likelihood
+
+
+def make_objective(
+    reg: Regressor,
+    data: tuple[pd.Series, pd.DataFrame, pd.DataFrame, pd.DataFrame],
+) -> Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]]:
+    """Build a validated CPU/float64 posterior value/gradient in free eta.
+
+    Unlike the shared physical likelihood, this optimization adapter includes
+    frequentist parameter transforms, priors and penalties, without Jacobians.
+    """
+    likelihood = make_likelihood(reg.ss, data)
+    import jax
+    import jax.numpy as jnp
+
+    enable_x64 = jax.enable_x64
+    cpu = jax.devices("cpu")[0]
+    parameters = cast("Parameters", deepcopy(reg.parameters))
+    leaves = parameters.parameters
+    eta0 = np.asarray(parameters.eta_free, dtype=np.float64).copy()
+
+    def objective(eta: Any) -> tuple[Any, Any]:
+        physical = []
+        offset = jnp.asarray(0.0)
+        free_index = 0
+        for parameter in leaves:
+            if parameter.free:
+                standardized = parameter._transform.untransform(
+                    eta[free_index], xp=jnp,
+                )
+                free_index += 1
+                offset = offset + 1e-4 * parameter._transform.penalty(
+                    standardized, xp=jnp,
+                )
+                if parameter.prior is not None:
+                    offset = offset - parameter.prior.jax_logpdf(standardized)
+            else:
+                standardized = jnp.asarray(parameter.theta_sd)
+            physical.append(parameter.loc + parameter.scale * standardized)
+        theta = jnp.stack(physical) if physical else jnp.empty((0,))
+        value, bad_row = likelihood(theta)
+        return value + offset, bad_row
 
     with enable_x64(), jax.default_device(cpu):
         compiled = jax.jit(jax.value_and_grad(objective, has_aux=True))
@@ -218,7 +219,7 @@ def make_objective(
         jax.errors.UnexpectedTracerError,
     ) as error:
         raise TypeError(
-            f"{type(model).__name__} cannot be differentiated by the JAX backend. "
+            f"{type(reg.ss).__name__} cannot be differentiated by the JAX backend. "
             "Custom models must provide traceable continuous_matrices(theta, xp=...) "
             "and discrete_covariance(theta, dt, xp=...) operations, or use the "
             "default SciPy fitting backend."

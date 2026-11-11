@@ -1,14 +1,13 @@
 """Periodic kernels modulated by Matérn temporal decay."""
 
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any
 
 import numpy as np
 
-from ...params import Parameters
-from .._functional import array_namespace, array_set
+from .._functional import ContinuousMatrices
 from ..base import GPModel
-from ._bessel import periodic_scales
+from ._bessel import periodic_variances
 
 
 @dataclass
@@ -53,24 +52,34 @@ class QuasiPeriodic12(GPModel):
 
     def set_constant_continuous_ssm(self) -> None:
         """Mutate parameter-independent continuous matrices in place."""
-        self.C = array_set(self.C, (0, slice(None, None, 2)), 1.0)
+        self.C[0, ::2] = 1.0
         self._kron = np.kron(
             np.diag(range(self.J + 1)),
             np.array([[0.0, -2.0 * np.pi], [2.0 * np.pi, 0.0]]),
         )
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
-        period, mscale, lscale, sigv, decay, *_ = cast(Parameters, self.parameters).theta
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Return decaying harmonic dynamics and full covariances.
 
-        xp = array_namespace(self.A)
-        self.A = array_set(self.A, slice(None), self._kron / period + xp.kron(
-            xp.eye(self.J + 1), xp.asarray([[-1.0 / decay, 0.0], [0.0, -1.0 / decay]])
-        ))
-        scales = periodic_scales(mscale, lscale, self.J, xp=xp)
-        self.R = array_set(self.R, (0, 0), sigv)
-        self.P0 = array_set(self.P0, self._diag, xp.repeat(scales, 2))
-        self.Q = array_set(self.Q, slice(None), self.P0 * 2.0**0.5 * decay ** (-0.5))
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy or JAX NumPy array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Decaying harmonics, configured observations/mean, and covariances.
+        """
+        period, mscale, lscale, sigv, decay, *_ = theta
+        p0 = xp.diag(xp.repeat(periodic_variances(mscale, lscale, self.J, xp=xp), 2))
+        return ContinuousMatrices(
+            xp.asarray(self._kron) / period - xp.eye(self.nx) / decay,
+            xp.zeros((self.nx, 0)), xp.asarray(self.C), xp.asarray(self.D),
+            2.0 * p0 / decay, xp.asarray([[sigv**2]]), xp.asarray(self.x0), p0,
+        )
 
 
 @dataclass
@@ -118,7 +127,7 @@ class QuasiPeriodic32(GPModel):
 
     def set_constant_continuous_ssm(self) -> None:
         """Mutate parameter-independent continuous matrices in place."""
-        self.C = array_set(self.C, (0, slice(None, None, 4)), 1.0)
+        self.C[0, ::4] = 1.0
         two_pi = 2.0 * np.pi
         self._kron = np.kron(
             np.diag(range(self.J + 1)),
@@ -132,30 +141,37 @@ class QuasiPeriodic32(GPModel):
             ),
         )
 
-    def update_continuous_ssm(self) -> None:
-        """Mutate continuous matrices and initial moments from physical parameters."""
-        period, mscale, lscale, sigv, decay, *_ = cast(Parameters, self.parameters).theta
+    def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
+        """Return Matérn-modulated harmonic dynamics and full covariances.
 
-        xp = array_namespace(self.A)
+        Parameters
+        ----------
+        theta : array
+            Physical parameters in model order.
+        xp : module, optional
+            NumPy or JAX NumPy array namespace.
+
+        Returns
+        -------
+        ContinuousMatrices
+            Modulated harmonics, configured observations/mean, and covariances.
+        """
+        period, mscale, lscale, sigv, decay, *_ = theta
         tmp1 = -3.0 / decay**2
         tmp2 = -2.0 * 3.0**0.5 / decay
-        self.A = array_set(self.A, slice(None), self._kron / period + xp.kron(
+        a = xp.asarray(self._kron) / period + xp.kron(
             xp.eye(self.J + 1),
-            xp.asarray(
-                [
-                    [0.0, 1.0, 0.0, 0.0],
-                    [tmp1, tmp2, 0.0, 0.0],
-                    [0.0, 0.0, 0.0, 1.0],
-                    [0.0, 0.0, tmp1, tmp2],
-                ]
-            ),
-        ))
-        scales = periodic_scales(mscale, lscale, self.J, xp=xp)
-        self.R = array_set(self.R, (0, 0), sigv)
-        _P0 = xp.kron(xp.diag(scales), xp.eye(2))
-        self.Q = array_set(self.Q, slice(None), xp.kron(
-            _P0, xp.asarray([[0.0, 0.0], [0.0, 2.0 * 3.0**0.75 / decay**1.5]])
-        ))
-        self.P0 = array_set(self.P0, slice(None), xp.kron(
-            _P0, xp.asarray([[1.0, 0.0], [0.0, 3.0**0.5 / decay]])
-        ))
+            xp.asarray([
+                [0.0, 1.0, 0.0, 0.0],
+                [tmp1, tmp2, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, tmp1, tmp2],
+            ]),
+        )
+        spectral = xp.diag(xp.repeat(periodic_variances(mscale, lscale, self.J, xp=xp), 2))
+        return ContinuousMatrices(
+            a, xp.zeros((self.nx, 0)), xp.asarray(self.C), xp.asarray(self.D),
+            xp.kron(spectral, xp.diag(xp.asarray([0.0, 4.0 * 3.0**1.5 / decay**3]))),
+            xp.asarray([[sigv**2]]), xp.asarray(self.x0),
+            xp.kron(spectral, xp.diag(xp.asarray([1.0, 3.0 / decay**2]))),
+        )

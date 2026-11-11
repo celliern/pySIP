@@ -30,12 +30,13 @@ from pysip.params.transforms import (
     UpperTransform,
 )
 from pysip.statespace import (
+    ContinuousMatrices,
     Matern32,
     Periodic,
     QuasiPeriodic12,
     QuasiPeriodic32,
     StateSpace,
-    array_set,
+    TwTi_RoRi,
 )
 
 
@@ -48,16 +49,19 @@ class CoupledModel(StateSpace):
     params = (("ANY", "decay", "decay rate"),)
     zero_covariances = False
 
-    def update_continuous_ssm(self):
-        decay = self.parameters.theta[0]
-        self.A = array_set(self.A, slice(None), [[-decay, 0.3], [0.0, -0.4]])
-        self.B = array_set(self.B, slice(None), [[0.4], [0.2]])
-        self.C = array_set(self.C, slice(None), [[1.0, 0.2], [0.1, 1.0]])
-        self.D = array_set(self.D, slice(None), [[0.3], [-0.2]])
-        self.Q = array_set(self.Q, (1, 1), 0.0 if self.zero_covariances else 0.05)
-        self.R = array_set(self.R, slice(None), [[0.2, 0.12], [0.0, 0.3]])
-        self.x0 = array_set(self.x0, slice(None), [[0.2], [-0.1]])
-        self.P0 = array_set(self.P0, (0, 0), 0.0 if self.zero_covariances else 0.4)
+    def continuous_matrices(self, theta, *, xp=np):
+        decay = theta[0]
+        r = xp.array([[0.2, 0.12], [0.0, 0.3]])
+        return ContinuousMatrices(
+            xp.array([[-decay, 0.3], [0.0, -0.4]]),
+            xp.array([[0.4], [0.2]]),
+            xp.array([[1.0, 0.2], [0.1, 1.0]]),
+            xp.array([[0.3], [-0.2]]),
+            xp.diag(xp.array([0.0, 0.0 if self.zero_covariances else 0.05**2])),
+            r.T @ r,
+            xp.array([[0.2], [-0.1]]),
+            xp.diag(xp.array([0.0 if self.zero_covariances else 0.4**2, 0.0])),
+        )
 
 
 def coupled_case(zero_covariances=False, hold_order=0):
@@ -82,6 +86,41 @@ def reference_objective(reg, data):
         return reference.log_likelihood(data) - reference.parameters.prior + reference.parameters.penalty
 
     return objective
+
+
+
+def test_canonical_definition_is_pure_and_numpy_update_preserves_covariances():
+    reg, _ = coupled_case()
+    model = reg.ss
+    theta = reg.parameters.theta.copy()
+    before = [getattr(model, name).copy() for name in ("A", "B", "C", "D", "Q", "R", "x0", "P0")]
+    alternate = theta + 0.2
+    matrices = model.continuous_matrices(alternate)
+    np.testing.assert_allclose(matrices.A[0, 0], -alternate[0])
+    np.testing.assert_array_equal(reg.parameters.theta, theta)
+    for name, expected in zip(("A", "B", "C", "D", "Q", "R", "x0", "P0"), before):
+        np.testing.assert_array_equal(getattr(model, name), expected)
+    reg.parameters.theta = alternate
+    model.update()
+    for actual, expected in zip(
+        (model.A, model.B, model.C, model.D, model.Q.T @ model.Q,
+         model.R.T @ model.R, model.x0, model.P0.T @ model.P0), matrices,
+    ):
+        np.testing.assert_allclose(actual, expected, atol=1e-14)
+
+
+def test_thermal_canonical_covariances_accept_traced_parameters():
+    model = TwTi_RoRi()
+    theta = np.ones(model.parameters.n_par)
+    with jax.enable_x64():
+        value, derivative = jax.jvp(
+            lambda physical: model.continuous_matrices(physical, xp=jnp),
+            (jnp.asarray(theta),), (jnp.ones_like(theta),),
+        )
+    np.testing.assert_allclose(value.Qc, np.eye(2))
+    np.testing.assert_allclose(value.P0c, np.eye(2))
+    np.testing.assert_allclose(derivative.Qc, 2.0 * np.eye(2))
+    np.testing.assert_allclose(derivative.P0c, 2.0 * np.eye(2))
 
 
 @pytest.mark.parametrize("zero_covariances,hold_order", [(False, 0), (True, 1)])
@@ -150,21 +189,18 @@ def test_jax_fit_preserves_fixed_parameters_and_fitted_uncertainty():
 
 
 def test_unsupported_customizations_and_singular_innovations_fail_explicitly():
-    class LegacyModel(CoupledModel):
-        def update_continuous_ssm(self):
-            super().update_continuous_ssm()
-            self.A[0, 0] = -self.parameters.theta[0]
-
     reg, data = coupled_case()
-    legacy = Regressor(LegacyModel(deepcopy(reg.parameters)))
-    np.testing.assert_allclose(legacy.log_likelihood(data), reg.log_likelihood(data), atol=1e-12)
-    with pytest.raises(TypeError, match="immutable|continuous_matrices"):
-        legacy.fit(data, backend="jax", disp=False)
+
+    class UndefinedModel(CoupledModel):
+        continuous_matrices = StateSpace.continuous_matrices
+
+    with pytest.raises(NotImplementedError, match="define continuous_matrices"):
+        UndefinedModel(deepcopy(reg.parameters)).update()
 
     class SingularModel(CoupledModel):
-        def update_continuous_ssm(self):
-            super().update_continuous_ssm()
-            self.R = array_set(self.R, slice(None), [[0.0, 0.0], [0.0, 0.0]])
+        def continuous_matrices(self, theta, *, xp=np):
+            matrices = super().continuous_matrices(theta, xp=xp)
+            return matrices._replace(Rc=xp.zeros_like(matrices.Rc))
 
     singular = SingularModel(deepcopy(reg.parameters))
     singular.zero_covariances = True

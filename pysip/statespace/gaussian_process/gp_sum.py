@@ -8,12 +8,7 @@ import numpy as np
 
 from ...params import Parameters
 from ...utils.math import nearest_cholesky
-from .._functional import (
-    ContinuousMatrices,
-    apply_covariances,
-    block_diag,
-    model_covariances,
-)
+from .._functional import ContinuousMatrices, block_diag
 from ..base import GPModel, Node, Par
 
 
@@ -127,14 +122,6 @@ class GPSum(GPModel):
         a = block_diag(a1, a2, xp=xp)
         b = xp.zeros((a.shape[0], 0))
         return a, b, b, block_diag(q1, q2, xp=xp)
-
-    def update_continuous_ssm(self) -> None:
-        """Refresh children and factor the shared block-diagonal covariance law."""
-        self._gp1.update_continuous_ssm()
-        self._gp2.update_continuous_ssm()
-        apply_covariances(self, self._combine_continuous(
-            model_covariances(self._gp1), model_covariances(self._gp2)
-        ))
 
     def continuous_matrices(self, theta: Any, *, xp: Any = np) -> ContinuousMatrices:
         """Evaluate a sum covariance realization without mutating either child.

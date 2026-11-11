@@ -276,6 +276,8 @@ To implement your model, you can follow the template below:
 
 ```python
 from dataclasses import dataclass
+import numpy as np
+from pysip.statespace import ContinuousMatrices
 from pysip.statespace.base import RCModel
 
 @dataclass
@@ -301,18 +303,18 @@ class Ti_RA(RCModel):
 
     outputs = [("TEMPERATURE", "xi", "indoor temperature")]
 
-    def set_constant_continuous_ssm(self):
-        self.C[0, 0] = 1.0
-
-    def update_continuous_ssm(self):
-        R, C, A, sigw, sigv, x0, sigx0, *_ = self.parameters.theta
-
-        self.A[0, 0] = -1.0 / (C * R)
-        self.B[0, :] = [1.0 / (C * R), A / C, 1.0 / C]
-        self.Q[0, 0] = sigw
-        self.R[0, 0] = sigv
-        self.x0[0, 0] = x0
-        self.P0[0, 0] = sigx0
+    def continuous_matrices(self, theta, *, xp=np):
+        R, C, A, sigw, sigv, x0, sigx0 = theta
+        return ContinuousMatrices(
+            xp.array([[-1.0 / (C * R)]]),
+            xp.array([[1.0 / (C * R), A / C, 1.0 / C]]),
+            xp.array([[1.0]]),
+            xp.zeros((1, 3)),
+            xp.array([[sigw**2]]),
+            xp.array([[sigv**2]]),
+            xp.array([[x0]]),
+            xp.array([[sigx0**2]]),
+        )
 ```
 
 ### Opt-in CPU JAX fitting
@@ -335,23 +337,20 @@ innovation covariance is positive definite. Singular innovations or nonfinite
 objectives/gradients raise explicit errors; no noise jitter, covariance clipping,
 or silent fallback changes the statistical model.
 
-Custom models using in-place updates continue to work with the default backend.
-To make the same equations traceable, import `array_set` and `array_namespace`
-from `pysip.statespace`. Replace dynamic indexed writes such as
-`self.A[0, 0] = value` with
-`self.A = array_set(self.A, (0, 0), value)`, and use
-`xp = array_namespace(self.A)` instead of NumPy for parameter-dependent array
-operations. Constant initialization can remain NumPy.
+`continuous_matrices(theta, *, xp=np)` is the canonical model definition for
+**both** backends. Return `ContinuousMatrices(A, B, C, D, Qc, Rc, x0, P0c)`:
+the three `*c` matrices are **full covariances**, not upper factors, and
+`theta` contains all physical parameters, including fixed leaves, in flattened
+order. Use the supplied NumPy-compatible namespace for parameter-dependent
+array operations, and do not mutate the model or read parameters from `self`.
+The inherited `update_continuous_ssm()` evaluates this definition with NumPy and
+updates the mutable matrices, factoring covariances into the existing upper
+`Q`, `R`, and `P0` attributes. Old custom mutable update definitions must migrate
+to this interface; `array_set` and `array_namespace` are no longer needed.
 
-`ContinuousMatrices` is also exported from `pysip.statespace`.
-
-Alternatively, implement `continuous_matrices(theta, *, xp)` as a pure function
-returning `ContinuousMatrices(A, B, C, D, Qc, Rc, x0, P0c)`: the three `*c`
-matrices are **full covariances**, not upper factors, and `theta` contains all
-physical parameters in flattened order. Override `discrete_covariance(theta,
-dt, *, xp)` as well if your model customizes discretization; its last result
-is the full discrete process covariance. Define equations once and let the
-mutable reference update call that same definition.
+Override `discrete_covariance(theta, dt, *, xp=np)` as well if your model
+customizes discretization; its last result is the full discrete process
+covariance. The same definition must describe both backends.
 
 Custom prior subclasses must provide `jax_logpdf(value)`; their arbitrary
 SciPy factories cannot be automatically differentiated. Custom transforms
@@ -362,14 +361,13 @@ or ignoring custom discretization.
 Compilation occurs inside each fit and depends on the model and prepared data.
 The compiled objective is reused for optimizer iterations, not cached across
 independent fits. Local x64/CPU contexts do not change global JAX settings.
-The standard `predict`, filtering, simulation, and Bayesian interfaces remain
-unchanged. GPU and Julia execution are outside this backend.
+The standard prediction, filtering, and simulation interfaces remain unchanged.
+For PyMC's JAX posterior samplers, see [JAX sampling](jax-sampling.md).
+GPU and Julia execution are outside this backend.
 
-
-In the `set_constant_continuous_ssm` method, you define the constant part of the
-continuous matrices. In the `update_continuous_ssm` method, you define the
-dynamic part of the continuous matrices that needs to be updated at each
-parameter change.
+Fixed configuration may be initialized in `set_constant_continuous_ssm()`.
+Keep all parameter-dependent equations in `continuous_matrices()`; do not
+override the mutable update adapter.
 
 ## Statespace estimator
 
